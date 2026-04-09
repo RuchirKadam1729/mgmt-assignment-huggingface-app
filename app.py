@@ -66,8 +66,9 @@ CHART_OPTIONS = {
 
 # ─── Agent Singleton ──────────────────────────────────────────────────────────
 
+import uuid
 agent = create_agent()
-THREAD_ID = "bertopic-session-1"
+THREAD_ID = f"bertopic-session-{uuid.uuid4().hex[:8]}"
 
 # ─── Helper: Phase Progress HTML ─────────────────────────────────────────────
 
@@ -252,6 +253,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
     # State
     run_key_state = gr.State("abstract")
     uploaded_path_state = gr.State(None)
+    thread_id_state = gr.State(THREAD_ID)
 
     # ── Header ──────────────────────────────────────────────────────────────
     gr.HTML(
@@ -286,6 +288,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                 scale=5,
             )
             send_btn = gr.Button("Send →", scale=1, variant="primary")
+            reset_btn = gr.Button("↺ Reset", scale=1, variant="secondary")
 
     # ── Section ③: Results ──────────────────────────────────────────────────
     with gr.Group():
@@ -361,7 +364,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
     # ─── Event: CSV Upload ────────────────────────────────────────────────────
 
-    def on_csv_upload(file_obj, history):
+    def on_csv_upload(file_obj, history, thread_id):
         if file_obj is None:
             return history, gr.update(), None
 
@@ -369,7 +372,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
         response = invoke_agent(
             agent,
             f"A CSV file has been uploaded. Please load and analyse it. File path: {filepath}",
-            thread_id=THREAD_ID,
+            thread_id=thread_id,
         )
         history = history or []
         history.append({"role": "assistant", "content": response})
@@ -377,13 +380,13 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
     csv_upload.upload(
         fn=on_csv_upload,
-        inputs=[csv_upload, chatbot],
+        inputs=[csv_upload, chatbot, thread_id_state],
         outputs=[chatbot, phase_progress, uploaded_path_state],
     )
 
     # ─── Event: Send Message ──────────────────────────────────────────────────
 
-    def on_send(user_msg, history, uploaded_path):
+    def on_send(user_msg, history, uploaded_path, thread_id):
         if not user_msg.strip():
             return history, "", get_phase_progress_html()
 
@@ -393,7 +396,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
         response = invoke_agent(
             agent,
             user_msg,
-            thread_id=THREAD_ID,
+            thread_id=thread_id,
             uploaded_file=uploaded_path,
         )
         history.append({"role": "assistant", "content": response})
@@ -401,13 +404,22 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
     send_btn.click(
         fn=on_send,
-        inputs=[user_input, chatbot, uploaded_path_state],
+        inputs=[user_input, chatbot, uploaded_path_state, thread_id_state],
         outputs=[chatbot, user_input, phase_progress],
     )
     user_input.submit(
         fn=on_send,
-        inputs=[user_input, chatbot, uploaded_path_state],
+        inputs=[user_input, chatbot, uploaded_path_state, thread_id_state],
         outputs=[chatbot, user_input, phase_progress],
+    )
+
+    def on_reset():
+        new_thread_id = f"bertopic-session-{uuid.uuid4().hex[:8]}"
+        return [], new_thread_id, get_phase_progress_html()
+
+    reset_btn.click(
+        fn=on_reset,
+        outputs=[chatbot, thread_id_state, phase_progress],
     )
 
     # ─── Event: Refresh Table ─────────────────────────────────────────────────
@@ -423,7 +435,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
     # ─── Event: Submit Review ─────────────────────────────────────────────────
 
-    def on_submit_review(table_data, run_key, history):
+    def on_submit_review(table_data, run_key, history, thread_id):
         history = history or []
         theme_map_json = parse_review_table_to_theme_map(table_data)
 
@@ -433,7 +445,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
             f"Please proceed to the next B&C phase."
         )
 
-        response = invoke_agent(agent, message, thread_id=THREAD_ID)
+        response = invoke_agent(agent, message, thread_id=thread_id)
         history.append({"role": "assistant", "content": response})
 
         updated_table = load_review_table(run_key)
@@ -441,7 +453,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
     submit_review_btn.click(
         fn=on_submit_review,
-        inputs=[review_table, run_selector, chatbot],
+        inputs=[review_table, run_selector, chatbot, thread_id_state],
         outputs=[chatbot, review_table, phase_progress],
     )
 

@@ -15,11 +15,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
-
+import os
 from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_mistralai import ChatMistralAI
+from langchain_groq import ChatGroq
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics.pairwise import cosine_similarity
@@ -36,7 +36,8 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
 NEAREST_K = 5
-MAX_LABEL_TOPICS = 100
+MAX_LABEL_TOPICS = 30
+GROQ_MODEL = "llama-3.1-8b-instant"  # 500k TPD free tier — no regional restrictions
 
 RUN_CONFIGS = {
     "abstract": ["Abstract"],
@@ -105,7 +106,7 @@ def load_scopus_csv(filepath: str) -> str:
     Returns a stats summary string with paper count, abstract sentences, and title sentences.
     """
 
-    df = pd.read_csv(filepath, encoding="utf-8-8", on_bad_lines="skip")
+    df = pd.read_csv(filepath, encoding="utf-8", on_bad_lines="skip")
 
     abstract_col = next((c for c in df.columns if "abstract" in c.lower()), None)
     title_col = next((c for c in df.columns if c.lower() == "title"), None)
@@ -305,13 +306,16 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
 
 @tool
 def label_topics_with_llm(run_key: str) -> str:
-    """Send top 100 topics to Mistral LLM for labelling. Each topic gets a label,
+    """Send top 100 topics to ChatGroq LLM for labelling. Each topic gets a label,
     category, confidence score, reasoning, and niche flag. Saves labels.json."""
 
+    assert (CHECKPOINT_DIR / f"summaries_{run_key}.json").exists(), (
+        f"summaries_{run_key}.json not found. Call run_bertopic_discovery(run_key='{run_key}') first."
+    )
     summaries = json.loads((CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text())
     top_topics = summaries[:MAX_LABEL_TOPICS]
 
-    llm = ChatMistralAI(model="mistral-small-latest", temperature=0.1)
+    llm = ChatGroq(model=GROQ_MODEL, temperature=0.1)
 
     def build_topic_text(t):
         sentences_text = "\n".join([f"  - {s}" for s in t["top_sentences"][:3]])
@@ -390,6 +394,15 @@ def consolidate_into_themes(run_key: str, theme_map: str) -> str:
     theme_map is a JSON string: {"Theme Name": [cluster_id1, cluster_id2, ...], ...}
     Recomputes centroids and sentence/paper counts. Saves themes.json."""
 
+    assert (CHECKPOINT_DIR / f"labels_{run_key}.json").exists(), (
+        f"labels_{run_key}.json not found. Call label_topics_with_llm(run_key='{run_key}') first."
+    )
+    assert (CHECKPOINT_DIR / f"emb_{run_key}.npy").exists(), (
+        f"emb_{run_key}.npy not found. Call run_bertopic_discovery(run_key='{run_key}') first."
+    )
+    assert (CHECKPOINT_DIR / f"sentences_{run_key}.json").exists(), (
+        f"sentences_{run_key}.json not found. Call run_bertopic_discovery(run_key='{run_key}') first."
+    )
     labels_data = json.loads((CHECKPOINT_DIR / f"labels_{run_key}.json").read_text())
     embeddings = np.load(CHECKPOINT_DIR / f"emb_{run_key}.npy")
     sentences = json.loads((CHECKPOINT_DIR / f"sentences_{run_key}.json").read_text())
@@ -458,12 +471,15 @@ def consolidate_into_themes(run_key: str, theme_map: str) -> str:
 
 @tool
 def compare_with_taxonomy(run_key: str) -> str:
-    """Map final themes to the PAJAIS 25 research categories using Mistral LLM.
+    """Map final themes to the PAJAIS 25 research categories using ChatGroq LLM.
     Each theme is classified as MAPPED (with category) or NOVEL (new contribution).
     Saves taxonomy_map.json."""
 
+    assert (CHECKPOINT_DIR / f"themes_{run_key}.json").exists(), (
+        f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+    )
     themes = json.loads((CHECKPOINT_DIR / f"themes_{run_key}.json").read_text())
-    llm = ChatMistralAI(model="mistral-small-latest", temperature=0.1)
+    llm = ChatGroq(model=GROQ_MODEL, temperature=0.1)
 
     categories_text = "\n".join(
         [f"  {i+1}. {c}" for i, c in enumerate(PAJAIS_CATEGORIES)]
@@ -612,8 +628,14 @@ def export_narrative(run_key: str = "abstract") -> str:
     themes_path = CHECKPOINT_DIR / f"themes_{run_key}.json"
     taxonomy_path = CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json"
 
-    themes = json.loads(themes_path.read_text()) if themes_path.exists() else []
-    taxonomy = json.loads(taxonomy_path.read_text()) if taxonomy_path.exists() else []
+    assert themes_path.exists(), (
+        f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+    )
+    assert taxonomy_path.exists(), (
+        f"taxonomy_map_{run_key}.json not found. Call compare_with_taxonomy(run_key='{run_key}') first."
+    )
+    themes = json.loads(themes_path.read_text())
+    taxonomy = json.loads(taxonomy_path.read_text())
 
     tax_lookup = {t["theme_name"]: t for t in taxonomy}
 
@@ -631,7 +653,7 @@ def export_narrative(run_key: str = "abstract") -> str:
     ]
     novel_list = ", ".join(novel_themes) if novel_themes else "none identified"
 
-    llm = ChatMistralAI(model="mistral-small-latest", temperature=0.3)
+    llm = ChatGroq(model=GROQ_MODEL, temperature=0.3)
 
     prompt = PromptTemplate.from_template(
         """You are writing Section 7 of a conference paper on topic modelling of a journal's literature.
