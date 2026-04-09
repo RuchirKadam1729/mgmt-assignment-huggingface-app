@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir \
 # LangChain stack
 RUN pip install --no-cache-dir \
     langchain-core>=0.2.0 \
-    langchain-mistralai>=0.1.7 \
+    langchain-groq>=0.1.7 \
     langgraph>=0.0.30
 
 # UI + data — pin gradio, change this layer most often

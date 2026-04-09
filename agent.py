@@ -3,13 +3,13 @@ agent.py  –  SYSTEM_PROMPT + LangGraph ReAct agent for BERTopic thematic analy
 
 Architecture:
   - SYSTEM_PROMPT encodes ALL workflow knowledge (B&C 6 phases, 4 STOP gates, rules)
-  - LangGraph create_react_agent connects ChatMistralAI to the 7 tools
+  - LangGraph create_react_agent connects ChatGroq to the 7 tools
   - MemorySaver gives the agent conversation memory within a session
   - ZERO business logic in this file — all decisions flow from the LLM reading the prompt
 """
 
 import os
-from langchain_mistralai import ChatMistralAI
+from langchain_groq import ChatGroq
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from tools import ALL_TOOLS
@@ -242,10 +242,11 @@ from langgraph.prebuilt import create_react_agent, ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 def create_agent():
-    llm = ChatMistralAI(
-        model="mistral-small-latest",
+    llm = ChatGroq(
+        model="llama-3.1-8b-instant",
+        groq_api_key=os.environ.get("GROQ_API_KEY"),
         temperature=0.1,
-        mistral_api_key=os.environ.get("MISTRAL_API_KEY"),
+        disable_streaming=True,
     )
     memory = MemorySaver()
 
