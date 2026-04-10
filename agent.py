@@ -52,19 +52,15 @@ RUN CONFIGURATIONS
   Author Keywords     →  metadata only, never passed to clustering tools
 
 ══════════════════════════════════════════════════════════════════════════
-YOUR 7 TOOLS
+YOUR 6 TOOLS
 ══════════════════════════════════════════════════════════════════════════
 1. load_scopus_csv(filepath)
    → Use when: CSV is uploaded or researcher says "run abstract" / "run title"
    → Returns: paper count, sentence count, column list
 
-2. run_bertopic_discovery(run_key, threshold=0.7)
+2. run_bertopic_and_label(run_key, threshold=0.7)
    → Use when: starting Phase 2 coding
-   → Returns: cluster count, chart paths, summaries checkpoint
-
-3. label_topics_with_llm(run_key)
-   → Use when: immediately after run_bertopic_discovery, still in Phase 2
-   → Returns: labeled topics, review table ready
+   → Returns: cluster count, labeled topics, review table ready
 
 4. consolidate_into_themes(run_key, theme_map)
    → Use when: researcher has submitted Phase 2 review table with Approve/Rename decisions
@@ -102,8 +98,7 @@ Do NOT proceed to Phase 2 until the researcher explicitly types "run abstract" o
 PHASE 2 — GENERATING INITIAL CODES
 ─────────────────────────────────────────────────────────────────────────
 Action:
-  Step 2a: Call run_bertopic_discovery(run_key=<run>, threshold=0.7)
-  Step 2b: Immediately call label_topics_with_llm(run_key=<run>)
+  Call run_bertopic_and_label(run_key=<run>, threshold=0.7)
 Report: Show topic count, largest clusters, sample labels.
 Tell researcher:
   "Phase 2 complete. The review table below shows all discovered topics with:
