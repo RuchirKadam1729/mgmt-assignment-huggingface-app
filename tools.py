@@ -156,10 +156,9 @@ def load_scopus_csv(filepath: str) -> str:
     )
 
 
-# ─── Tool 2: Run BERTopic Discovery ──────────────────────────────────────
+# ─── Tool 2: Run BERTopic Discovery AND Label ──────────────────────────────────────
 
 
-@tool
 def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
     """Embed text sentences using all-MiniLM-L6-v2, cluster with AgglomerativeClustering
     (cosine metric, NO UMAP), find 5 nearest sentences per centroid, generate 4 Plotly charts.
@@ -301,17 +300,13 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
     )
 
 
-# ─── Tool 3: Label Topics with LLM ───────────────────────────────────────
-
-
-@tool
 def label_topics_with_llm(run_key: str) -> str:
     """Send top 100 topics to ChatGroq LLM for labelling. Each topic gets a label,
     category, confidence score, reasoning, and niche flag. Saves labels.json."""
 
-    assert (CHECKPOINT_DIR / f"summaries_{run_key}.json").exists(), (
-        f"summaries_{run_key}.json not found. Call run_bertopic_discovery(run_key='{run_key}') first."
-    )
+    assert (
+        CHECKPOINT_DIR / f"summaries_{run_key}.json"
+    ).exists(), f"summaries_{run_key}.json not found. Call run_bertopic_discovery(run_key='{run_key}') first."
     summaries = json.loads((CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text())
     top_topics = summaries[:MAX_LABEL_TOPICS]
 
@@ -385,24 +380,32 @@ Topics to label:
     )
 
 
-# ─── Tool 4: Consolidate into Themes ─────────────────────────────────────
+@tool
+def run_bertopic_and_label(run_key: str, threshold: float = 0.7) -> str:
+    """Run BERTopic discovery AND label topics with LLM in one step."""
+    discovery_result = run_bertopic_discovery(run_key, threshold)
+    label_result = label_topics_with_llm(run_key)
+    return discovery_result + "\n\n" + label_result
+
+
+# ─── Tool 3:   date into Themes ─────────────────────────────────────
 
 
 @tool
-def consolidate_into_themes(run_key: str, theme_map: str) -> str:
+def consolidate_into_themes(run_key: str, theme_map: dict) -> str:
     """Merge researcher-approved topic groups into consolidated themes.
-    theme_map is a JSON string: {"Theme Name": [cluster_id1, cluster_id2, ...], ...}
+    theme_map is a dict: {"Theme Name": [cluster_id1, cluster_id2, ...], ...}
     Recomputes centroids and sentence/paper counts. Saves themes.json."""
 
-    assert (CHECKPOINT_DIR / f"labels_{run_key}.json").exists(), (
-        f"labels_{run_key}.json not found. Call label_topics_with_llm(run_key='{run_key}') first."
-    )
-    assert (CHECKPOINT_DIR / f"emb_{run_key}.npy").exists(), (
-        f"emb_{run_key}.npy not found. Call run_bertopic_discovery(run_key='{run_key}') first."
-    )
-    assert (CHECKPOINT_DIR / f"sentences_{run_key}.json").exists(), (
-        f"sentences_{run_key}.json not found. Call run_bertopic_discovery(run_key='{run_key}') first."
-    )
+    assert (
+        CHECKPOINT_DIR / f"labels_{run_key}.json"
+    ).exists(), f"labels_{run_key}.json not found. Call label_topics_with_llm(run_key='{run_key}') first."
+    assert (
+        CHECKPOINT_DIR / f"emb_{run_key}.npy"
+    ).exists(), f"emb_{run_key}.npy not found. Call run_bertopic_discovery(run_key='{run_key}') first."
+    assert (
+        CHECKPOINT_DIR / f"sentences_{run_key}.json"
+    ).exists(), f"sentences_{run_key}.json not found. Call run_bertopic_discovery(run_key='{run_key}') first."
     labels_data = json.loads((CHECKPOINT_DIR / f"labels_{run_key}.json").read_text())
     embeddings = np.load(CHECKPOINT_DIR / f"emb_{run_key}.npy")
     sentences = json.loads((CHECKPOINT_DIR / f"sentences_{run_key}.json").read_text())
@@ -423,8 +426,6 @@ def consolidate_into_themes(run_key: str, theme_map: str) -> str:
         for i in range(len(sentences))
     }
 
-    theme_definition = json.loads(theme_map)
-
     def build_theme(theme_name_ids):
         theme_name, cluster_ids = theme_name_ids
         ids_set = set(map(str, cluster_ids))
@@ -443,7 +444,7 @@ def consolidate_into_themes(run_key: str, theme_map: str) -> str:
             "sub_topics": len(member_topics),
         }
 
-    themes = list(map(build_theme, theme_definition.items()))
+    themes = list(map(build_theme, theme_map.items()))
     themes_sorted = sorted(themes, key=lambda x: x["total_sentences"], reverse=True)
 
     (CHECKPOINT_DIR / f"themes_{run_key}.json").write_text(
@@ -466,7 +467,7 @@ def consolidate_into_themes(run_key: str, theme_map: str) -> str:
     )
 
 
-# ─── Tool 5: Compare with PAJAIS Taxonomy ────────────────────────────────
+# ─── Tool 4: Compare with PAJAIS Taxonomy ────────────────────────────────
 
 
 @tool
@@ -475,9 +476,9 @@ def compare_with_taxonomy(run_key: str) -> str:
     Each theme is classified as MAPPED (with category) or NOVEL (new contribution).
     Saves taxonomy_map.json."""
 
-    assert (CHECKPOINT_DIR / f"themes_{run_key}.json").exists(), (
-        f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
-    )
+    assert (
+        CHECKPOINT_DIR / f"themes_{run_key}.json"
+    ).exists(), f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
     themes = json.loads((CHECKPOINT_DIR / f"themes_{run_key}.json").read_text())
     llm = ChatGroq(model=GROQ_MODEL, temperature=0.1)
 
@@ -557,7 +558,7 @@ Themes to map:
     )
 
 
-# ─── Tool 6: Generate Comparison CSV ─────────────────────────────────────
+# ─── Tool 5: Generate Comparison CSV ─────────────────────────────────────
 
 
 @tool
@@ -617,7 +618,7 @@ def generate_comparison_csv() -> str:
     )
 
 
-# ─── Tool 7: Export Narrative ─────────────────────────────────────────────
+# ─── Tool 6: Export Narrative ─────────────────────────────────────────────
 
 
 @tool
@@ -628,12 +629,12 @@ def export_narrative(run_key: str = "abstract") -> str:
     themes_path = CHECKPOINT_DIR / f"themes_{run_key}.json"
     taxonomy_path = CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json"
 
-    assert themes_path.exists(), (
-        f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
-    )
-    assert taxonomy_path.exists(), (
-        f"taxonomy_map_{run_key}.json not found. Call compare_with_taxonomy(run_key='{run_key}') first."
-    )
+    assert (
+        themes_path.exists()
+    ), f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+    assert (
+        taxonomy_path.exists()
+    ), f"taxonomy_map_{run_key}.json not found. Call compare_with_taxonomy(run_key='{run_key}') first."
     themes = json.loads(themes_path.read_text())
     taxonomy = json.loads(taxonomy_path.read_text())
 
@@ -706,8 +707,7 @@ Write in formal academic English. Cite Braun & Clarke (2006), Grootendorst (2022
 
 ALL_TOOLS = [
     load_scopus_csv,
-    run_bertopic_discovery,
-    label_topics_with_llm,
+    run_bertopic_and_label,
     consolidate_into_themes,
     compare_with_taxonomy,
     generate_comparison_csv,
