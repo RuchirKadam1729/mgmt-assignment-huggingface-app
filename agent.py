@@ -238,7 +238,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 def create_agent():
     llm = ChatGroq(
-        model="llama-3.1-8b-instant",
+        model="llama-3.3-70b-versatile",
         groq_api_key=os.environ.get("GROQ_API_KEY"),
         temperature=0.1,
         disable_streaming=True,

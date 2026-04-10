@@ -37,7 +37,7 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 EMBED_MODEL = "all-MiniLM-L6-v2"
 NEAREST_K = 5
 MAX_LABEL_TOPICS = 30
-GROQ_MODEL = "llama-3.1-8b-instant"  # 500k TPD free tier — no regional restrictions
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 RUN_CONFIGS = {
     "abstract": ["Abstract"],
