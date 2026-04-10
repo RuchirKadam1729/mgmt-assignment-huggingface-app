@@ -11,19 +11,25 @@ Rules:
   - All decisions are made by the agent (agent.py / tools.py)
   - app.py only handles UI events, routing messages to the agent, and rendering outputs
 """
+
 # ── PATCHES — must be first, before any other import ──────────────────────
 import gradio_client.utils as _gcu
 
 # Patch 1: handle non-dict schemas (LangChain tool schema incompatibility)
 _orig_parse = _gcu._json_schema_to_python_type
+
+
 def _safe_parse(schema, defs=None):
     if not isinstance(schema, dict):
         return "Any"
     return _orig_parse(schema, defs)
+
+
 _gcu._json_schema_to_python_type = _safe_parse
 
 # Patch 2: fix localhost check failing inside Docker
 import gradio.networking as _gnet
+
 _gnet.is_localhost_accessible = lambda: True
 # ── END PATCHES ────────────────────────────────────────────────────────────
 import os
@@ -67,6 +73,7 @@ CHART_OPTIONS = {
 # ─── Agent Singleton ──────────────────────────────────────────────────────────
 
 import uuid
+
 agent = create_agent()
 THREAD_ID = f"bertopic-session-{uuid.uuid4().hex[:8]}"
 
@@ -227,23 +234,37 @@ def get_download_files() -> list:
 # ─── Helper: Parse submitted review table → theme_map JSON ───────────────────
 
 
-def parse_review_table_to_theme_map(table_data: list) -> str:
+def parse_review_table_to_theme_map(table_data) -> str:
+    import pandas as pd
+
+    # Gradio 5.x returns a DataFrame; convert to plain list-of-lists
+    if isinstance(table_data, pd.DataFrame):
+        rows = table_data.values.tolist()
+    else:
+        rows = table_data or []
+
     approved = list(
         filter(
-            lambda row: str(row[5]).strip().lower() in ("yes", "y", "1", "true"),
-            table_data,
+            lambda row: len(row) > 5
+            and str(row[5]).strip().lower() in ("yes", "y", "1", "true"),
+            rows,
         )
     )
     theme_groups = {}
     list(
         map(
             lambda row: theme_groups.setdefault(
-                str(row[6]).strip() if str(row[6]).strip() else str(row[1]).strip(), []
+                (
+                    str(row[6]).strip()
+                    if len(row) > 6 and str(row[6]).strip()
+                    else str(row[1]).strip()
+                ),
+                [],
             ).append(int(row[0]) - 1),
             approved,
         )
     )
-    return json.dumps(theme_groups)
+    return theme_groups
 
 
 # ─── Gradio Application ───────────────────────────────────────────────────────
@@ -437,12 +458,13 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
     def on_submit_review(table_data, run_key, history, thread_id):
         history = history or []
-        theme_map_json = parse_review_table_to_theme_map(table_data)
+        theme_map = parse_review_table_to_theme_map(table_data)
 
         message = (
             f"The researcher has submitted the review table for run_key='{run_key}'.\n"
-            f"Here are the approved groupings as a theme_map JSON:\n{theme_map_json}\n\n"
-            f"Please proceed to the next B&C phase."
+            f"The approved theme groupings are: {json.dumps(theme_map)}\n\n"
+            f"Please call consolidate_into_themes with run_key='{run_key}' "
+            f"and the theme_map object shown above. Proceed to Phase 3."
         )
 
         response = invoke_agent(agent, message, thread_id=thread_id)
