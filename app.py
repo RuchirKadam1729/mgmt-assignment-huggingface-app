@@ -466,7 +466,14 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
             f"Please call consolidate_into_themes with run_key='{run_key}' "
             f"and the theme_map object shown above. Proceed to Phase 3."
         )
-
+        # in on_submit_review, check current phase:
+        if current_phase == 3:
+            message = f"Phase 3 review submitted. theme_map: {json.dumps(theme_map)}. Call consolidate_into_themes..."
+        elif current_phase == 4:
+            message = "The researcher has confirmed theme coverage. Proceed to Phase 5 — defining and naming themes."
+        elif current_phase == 5:
+            message = "The researcher has confirmed final theme names. Proceed to Phase 5.5 — call compare_with_taxonomy..."
+        # increment phase after each submit
         response = invoke_agent(agent, message, thread_id=thread_id)
         history.append({"role": "assistant", "content": response})
 
