@@ -529,7 +529,12 @@ Themes to map:
             return (r1 if isinstance(r1, list) else []) + (r2 if isinstance(r2, list) else [])
 
     batches = make_batches(themes, BATCH_SIZE)
-    raw_results = list(map(process_batch, batches))
+    import time
+    def process_with_delay(batch):
+        result = process_batch(batch)
+        time.sleep(2)  # 2s gap between batches keeps TPM well under 12k/min
+        return result
+    raw_results = list(map(process_with_delay, batches))
 
     # Flatten and filter out any non-dict items from malformed LLM responses
     result = [
