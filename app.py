@@ -37,6 +37,7 @@ except (ImportError, AttributeError):
 # ── END PATCHES ────────────────────────────────────────────────────────────
 import os
 import json
+import shutil
 import gradio as gr
 from pathlib import Path
 from agent import create_agent, invoke_agent
@@ -389,18 +390,24 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
     # ─── Event: CSV Upload ────────────────────────────────────────────────────
 
     def on_csv_upload(file_obj, history, thread_id):
+        import shutil
         if file_obj is None:
             return history, gr.update(), None
 
-        filepath = file_obj.name
+        # Copy uploaded file to persistent checkpoint directory
+        temp_path = file_obj.name
+        filename = Path(temp_path).name
+        persistent_path = CHECKPOINT_DIR / filename
+        shutil.copy(temp_path, persistent_path)
+        
         response = invoke_agent(
             agent,
-            f"A CSV file has been uploaded. Please load and analyse it. File path: {filepath}",
+            f"A CSV file has been uploaded. Please load and analyse it. File path: {persistent_path}",
             thread_id=thread_id,
         )
         history = history or []
         history.append({"role": "assistant", "content": response})
-        return history, get_phase_progress_html(), filepath
+        return history, get_phase_progress_html(), str(persistent_path)
 
     csv_upload.upload(
         fn=on_csv_upload,
