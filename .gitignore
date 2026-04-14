@@ -2,4 +2,5 @@ secrets/*
 **/*.csv
 **/*.json
 **/*.txt
-checkpoints/*
+checkpoints/
+**/checkpoints/
