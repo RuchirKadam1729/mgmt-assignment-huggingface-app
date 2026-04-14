@@ -13,24 +13,27 @@ Rules:
 """
 
 # ── PATCHES — must be first, before any other import ──────────────────────
-import gradio_client.utils as _gcu
 
 # Patch 1: handle non-dict schemas (LangChain tool schema incompatibility)
-_orig_parse = _gcu._json_schema_to_python_type
+try:
+    import gradio_client.utils as _gcu
+    _orig_parse = _gcu._json_schema_to_python_type
 
+    def _safe_parse(schema, defs=None):
+        if not isinstance(schema, dict):
+            return "Any"
+        return _orig_parse(schema, defs)
 
-def _safe_parse(schema, defs=None):
-    if not isinstance(schema, dict):
-        return "Any"
-    return _orig_parse(schema, defs)
+    _gcu._json_schema_to_python_type = _safe_parse
+except (ImportError, AttributeError):
+    pass
 
-
-_gcu._json_schema_to_python_type = _safe_parse
-
-# Patch 2: fix localhost check failing inside Docker
-import gradio.networking as _gnet
-
-_gnet.is_localhost_accessible = lambda: True
+# Patch 2: fix localhost check failing inside Docker (no-op on HF Spaces)
+try:
+    import gradio.networking as _gnet
+    _gnet.is_localhost_accessible = lambda: True
+except (ImportError, AttributeError):
+    pass
 # ── END PATCHES ────────────────────────────────────────────────────────────
 import os
 import json
