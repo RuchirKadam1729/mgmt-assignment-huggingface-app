@@ -1,7 +1,6 @@
 secrets/*
 **/*.csv
 **/*.json
-**/*.txt
 checkpoints/
 **/checkpoints/
 .DS_Store
