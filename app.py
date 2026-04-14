@@ -482,11 +482,12 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
         updated_table = load_review_table(run_key)
         return history, updated_table, get_phase_progress_html()
-        submit_review_btn.click(
-            fn=on_submit_review,
-            inputs=[review_table, run_selector, chatbot, thread_id_state],
-            outputs=[chatbot, review_table, phase_progress],
-        )
+
+    submit_review_btn.click(
+        fn=on_submit_review,
+        inputs=[review_table, run_selector, chatbot, thread_id_state],
+        outputs=[chatbot, review_table, phase_progress],
+    )
 
     # ─── Event: Refresh Downloads ─────────────────────────────────────────────
 
