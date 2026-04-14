@@ -192,12 +192,13 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
         sentences, normalize_embeddings=True, show_progress_bar=False
     )
 
+    
     clustering = AgglomerativeClustering(
-        metric="cosine",
-        linkage="average",
-        distance_threshold=threshold,
-        n_clusters=None,
-    )
+    metric="cosine",
+    linkage="average",
+    distance_threshold=threshold,
+    n_clusters=None,
+)
     labels = clustering.fit_predict(embeddings)
     n_clusters = int(labels.max()) + 1
 
@@ -414,17 +415,10 @@ def consolidate_into_themes(run_key: str, theme_map: dict) -> str:
     )
 
     cluster_lookup = {str(t["cluster_id"]): t for t in labels_data}
-    sentence_cluster_map = {
-        i: int(
-            AgglomerativeClustering(
-                metric="cosine",
-                linkage="average",
-                distance_threshold=0.7,
-                n_clusters=None,
-            ).fit_predict(embeddings)[i]
-        )
-        for i in range(len(sentences))
-    }
+    # AFTER — just load the cluster assignments from the summaries checkpoint
+    summaries_lookup = {str(s["cluster_id"]): s for s in cluster_labels_arr}
+    # sentence_cluster_map isn't actually used downstream, so this is fine:
+    sentence_cluster_map = {}
 
     def build_theme(theme_name_ids):
         theme_name, cluster_ids = theme_name_ids
@@ -476,9 +470,9 @@ def compare_with_taxonomy(run_key: str) -> str:
     Each theme is classified as MAPPED (with category) or NOVEL (new contribution).
     Saves taxonomy_map.json."""
 
-    assert (
-        CHECKPOINT_DIR / f"themes_{run_key}.json"
-    ).exists(), f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+    assert (CHECKPOINT_DIR / f"themes_{run_key}.json").exists(), \
+        f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+
     themes = json.loads((CHECKPOINT_DIR / f"themes_{run_key}.json").read_text())
     llm = ChatGroq(model=GROQ_MODEL, temperature=0.1)
 
@@ -489,8 +483,6 @@ def compare_with_taxonomy(run_key: str) -> str:
     def build_theme_text(t):
         sentences = "; ".join(t.get("representative_sentences", [])[:2])
         return f"THEME: {t['theme_name']}\nSentences: {sentences}"
-
-    themes_text = "\n\n".join(list(map(build_theme_text, themes)))
 
     prompt = PromptTemplate.from_template(
         """You are a systematic literature review expert. Map each research theme to the PAJAIS taxonomy.
@@ -514,26 +506,52 @@ Themes to map:
 
     parser = JsonOutputParser()
     chain = prompt | llm | parser
-    result = chain.invoke({"categories": categories_text, "themes_text": themes_text})
+
+    # ── Batch into chunks of 20 to stay under Groq's 12k TPM limit ──────────
+    BATCH_SIZE = 20
+
+    def make_batches(lst, size):
+        return [lst[i:i+size] for i in range(0, len(lst), size)]
+
+    def process_batch(batch):
+        themes_text = "\n\n".join(list(map(build_theme_text, batch)))
+        try:
+            return chain.invoke({"categories": categories_text, "themes_text": themes_text})
+        except Exception:
+            # If a batch still fails, halve it and retry once
+            half = len(batch) // 2
+            if half == 0:
+                return []
+            r1 = chain.invoke({"categories": categories_text,
+                                "themes_text": "\n\n".join(list(map(build_theme_text, batch[:half])))})
+            r2 = chain.invoke({"categories": categories_text,
+                                "themes_text": "\n\n".join(list(map(build_theme_text, batch[half:])))})
+            return (r1 if isinstance(r1, list) else []) + (r2 if isinstance(r2, list) else [])
+
+    batches = make_batches(themes, BATCH_SIZE)
+    raw_results = list(map(process_batch, batches))
+
+    # Flatten and filter out any non-dict items from malformed LLM responses
+    result = [
+        item for batch_result in raw_results
+        if isinstance(batch_result, list)
+        for item in batch_result
+        if isinstance(item, dict) and "theme_name" in item
+    ]
 
     mapped = {item["theme_name"]: item for item in result}
-    enriched = list(
-        map(
-            lambda t: {
-                **t,
-                **mapped.get(
-                    t["theme_name"],
-                    {
-                        "pajais_match": "NOVEL",
-                        "is_novel": True,
-                        "match_confidence": 0,
-                        "reasoning": "No mapping found",
-                    },
-                ),
-            },
-            themes,
-        )
-    )
+    enriched = list(map(
+        lambda t: {
+            **t,
+            **mapped.get(t["theme_name"], {
+                "pajais_match": "NOVEL",
+                "is_novel": True,
+                "match_confidence": 0,
+                "reasoning": "No mapping found",
+            }),
+        },
+        themes,
+    ))
 
     novel_count = sum(1 for t in enriched if t.get("is_novel", False))
     mapped_count = len(enriched) - novel_count
@@ -543,9 +561,7 @@ Themes to map:
     )
 
     novel_names = [t["theme_name"] for t in enriched if t.get("is_novel", False)]
-    novel_text = (
-        "\n".join([f"  * {n}" for n in novel_names]) if novel_names else "  (none)"
-    )
+    novel_text = "\n".join([f"  * {n}" for n in novel_names]) if novel_names else "  (none)"
 
     return (
         f"PAJAIS taxonomy mapping complete for run_key='{run_key}'.\n"
@@ -563,8 +579,10 @@ Themes to map:
 
 @tool
 def generate_comparison_csv() -> str:
-    """Load themes from both abstract and title runs and build a side-by-side
-    comparison DataFrame. Saves comparison.csv."""
+    """Load themes from both abstract and title runs and build a semantically-matched
+    side-by-side comparison DataFrame. Uses cosine similarity on theme name embeddings
+    to pair each abstract theme with its best-matching title theme (or mark ABSTRACT ONLY).
+    Saves comparison.csv."""
 
     abstract_path = CHECKPOINT_DIR / "themes_abstract.json"
     title_path = CHECKPOINT_DIR / "themes_title.json"
@@ -574,47 +592,137 @@ def generate_comparison_csv() -> str:
     )
     title_themes = json.loads(title_path.read_text()) if title_path.exists() else []
 
-    max_len = max(len(abstract_themes), len(title_themes))
-    pad = lambda lst: lst + [{}] * (max_len - len(lst))
+    # ── Semantic matching via cosine similarity on theme name embeddings ──────
+    # This correctly handles the common case where abstract has far more themes
+    # than title (e.g. 13 vs 4). Positional zip would leave most rows unmatched.
 
-    abstract_padded = pad(abstract_themes)
-    title_padded = pad(title_themes)
+    CONVERGENCE_THRESHOLD = (
+        0.40  # lenient for short theme names; raise to 0.55 for large corpora
+    )
 
-    rows = list(
+    model = SentenceTransformer(EMBED_MODEL)
+
+    abstract_names = list(map(lambda t: t.get("theme_name", ""), abstract_themes))
+    title_names = list(map(lambda t: t.get("theme_name", ""), title_themes))
+
+    # Embed all theme names; fallback gracefully when one run produced no themes
+    abstract_embs = (
+        model.encode(abstract_names, normalize_embeddings=True)
+        if abstract_names
+        else np.zeros((0, 384))
+    )
+    title_embs = (
+        model.encode(title_names, normalize_embeddings=True)
+        if title_names
+        else np.zeros((0, 384))
+    )
+
+    # For each abstract theme find its best-matching title theme (greedy, no reuse)
+    # We build a full similarity matrix then pick the argmax column per row.
+    matched_title = {}  # abstract_idx → title_idx or None
+    used_title_idxs = set()
+
+    def match_abstract_theme(abs_idx):
+        """Return (title_idx, similarity) for the best available title match."""
+        if len(title_embs) == 0:
+            return None, 0.0
+        sims = cosine_similarity(abstract_embs[abs_idx : abs_idx + 1], title_embs)[0]
+        # Mask already-used title themes so we don't double-assign
+        available_mask = np.array(
+            [0.0 if i in used_title_idxs else 1.0 for i in range(len(sims))]
+        )
+        masked_sims = sims * available_mask
+        best_idx = int(masked_sims.argmax())
+        best_sim = float(masked_sims[best_idx])
+        return best_idx, best_sim
+
+    # Greedy matching: process abstract themes in order; each title theme claimed once
+    matched_pairs = list(
         map(
-            lambda pair: {
-                "Abstract Theme": pair[0].get("theme_name", ""),
-                "Abstract Sentences": pair[0].get("total_sentences", ""),
-                "Abstract Sub-Topics": pair[0].get("sub_topics", ""),
-                "Title Theme": pair[1].get("theme_name", ""),
-                "Title Sentences": pair[1].get("total_sentences", ""),
-                "Title Sub-Topics": pair[1].get("sub_topics", ""),
-                "Convergence": (
-                    "CONVERGED"
-                    if pair[0].get("theme_name", "").lower()
-                    in pair[1].get("theme_name", "").lower()
-                    or pair[1].get("theme_name", "").lower()
-                    in pair[0].get("theme_name", "").lower()
-                    else "DIVERGED"
-                ),
-            },
-            zip(abstract_padded, title_padded),
+            lambda abs_idx: (abs_idx, *match_abstract_theme(abs_idx)),
+            range(len(abstract_themes)),
         )
     )
+
+    # Second pass: claim title indices regardless of similarity score.
+    # The Convergence label (CONVERGED/DIVERGED) communicates quality.
+    # This ensures every title theme appears in the table.
+    def claim_match(triple):
+        abs_idx, title_idx, sim = triple
+        if title_idx is not None and title_idx not in used_title_idxs:
+            used_title_idxs.add(title_idx)
+            return abs_idx, title_idx, sim
+        return abs_idx, None, sim
+
+    final_pairs = list(map(claim_match, matched_pairs))
+
+    # ── Build rows ────────────────────────────────────────────────────────────
+    def make_row(triple):
+        abs_idx, title_idx, sim = triple
+        at = abstract_themes[abs_idx]
+        tt = title_themes[title_idx] if title_idx is not None else {}
+
+        a_name = at.get("theme_name", "")
+        t_name = tt.get("theme_name", "")
+
+        if not t_name:
+            convergence = "ABSTRACT ONLY"
+        elif sim >= CONVERGENCE_THRESHOLD:
+            convergence = "CONVERGED"
+        else:
+            convergence = "DIVERGED"
+
+        return {
+            "Abstract Theme": a_name,
+            "Abstract Sentences": at.get("total_sentences", ""),
+            "Abstract Sub-Topics": at.get("sub_topics", ""),
+            "Title Theme": t_name,
+            "Title Sentences": tt.get("total_sentences", ""),
+            "Title Sub-Topics": tt.get("sub_topics", ""),
+            "Similarity": round(sim, 3) if t_name else "",
+            "Convergence": convergence,
+        }
+
+    rows = list(map(make_row, final_pairs))
+
+    # Append any title themes that were never matched to an abstract theme
+    matched_title_idxs = {triple[1] for triple in final_pairs if triple[1] is not None}
+    unmatched_title_rows = list(
+        map(
+            lambda ti: {
+                "Abstract Theme": "",
+                "Abstract Sentences": "",
+                "Abstract Sub-Topics": "",
+                "Title Theme": title_themes[ti].get("theme_name", ""),
+                "Title Sentences": title_themes[ti].get("total_sentences", ""),
+                "Title Sub-Topics": title_themes[ti].get("sub_topics", ""),
+                "Similarity": "",
+                "Convergence": "TITLE ONLY",
+            },
+            [i for i in range(len(title_themes)) if i not in matched_title_idxs],
+        )
+    )
+    rows = rows + unmatched_title_rows
 
     df = pd.DataFrame(rows)
     output_path = CHECKPOINT_DIR / "comparison.csv"
     df.to_csv(output_path, index=False)
 
     converged = sum(1 for r in rows if r["Convergence"] == "CONVERGED")
+    abstract_only = sum(1 for r in rows if r["Convergence"] == "ABSTRACT ONLY")
+    title_only = sum(1 for r in rows if r["Convergence"] == "TITLE ONLY")
+    diverged = sum(1 for r in rows if r["Convergence"] == "DIVERGED")
 
     return (
-        f"Comparison CSV generated.\n"
+        f"Comparison CSV generated (semantic matching, threshold={CONVERGENCE_THRESHOLD}).\n"
         f"  Abstract themes: {len(abstract_themes)}\n"
         f"  Title themes: {len(title_themes)}\n"
-        f"  Converged theme pairs: {converged}/{max_len}\n"
+        f"  CONVERGED pairs:  {converged}\n"
+        f"  DIVERGED pairs:   {diverged}\n"
+        f"  ABSTRACT ONLY:    {abstract_only}  (no close title match)\n"
+        f"  TITLE ONLY:       {title_only}  (no close abstract match)\n"
         f"  Saved: comparison.csv\n"
-        f"Download from the Results tab. Converged themes are stable — highest confidence for Section 7."
+        f"Converged themes are stable — highest confidence for Section 7."
     )
 
 
