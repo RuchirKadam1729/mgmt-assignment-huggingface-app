@@ -462,29 +462,21 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
         message = (
             f"The researcher has submitted the review table for run_key='{run_key}'.\n"
-            f"The approved theme groupings are: {json.dumps(theme_map)}\n\n"
+            f"Here are the approved groupings as a theme_map:\n{json.dumps(theme_map)}\n\n"
             f"Please call consolidate_into_themes with run_key='{run_key}' "
-            f"and the theme_map object shown above. Proceed to Phase 3."
+            f"and theme_map={json.dumps(theme_map)} and proceed to Phase 3."
         )
-        # in on_submit_review, check current phase:
-        if current_phase == 3:
-            message = f"Phase 3 review submitted. theme_map: {json.dumps(theme_map)}. Call consolidate_into_themes..."
-        elif current_phase == 4:
-            message = "The researcher has confirmed theme coverage. Proceed to Phase 5 — defining and naming themes."
-        elif current_phase == 5:
-            message = "The researcher has confirmed final theme names. Proceed to Phase 5.5 — call compare_with_taxonomy..."
-        # increment phase after each submit
+
         response = invoke_agent(agent, message, thread_id=thread_id)
         history.append({"role": "assistant", "content": response})
 
         updated_table = load_review_table(run_key)
         return history, updated_table, get_phase_progress_html()
-
-    submit_review_btn.click(
-        fn=on_submit_review,
-        inputs=[review_table, run_selector, chatbot, thread_id_state],
-        outputs=[chatbot, review_table, phase_progress],
-    )
+        submit_review_btn.click(
+            fn=on_submit_review,
+            inputs=[review_table, run_selector, chatbot, thread_id_state],
+            outputs=[chatbot, review_table, phase_progress],
+        )
 
     # ─── Event: Refresh Downloads ─────────────────────────────────────────────
 
