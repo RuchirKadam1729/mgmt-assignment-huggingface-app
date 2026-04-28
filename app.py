@@ -17,6 +17,7 @@ Rules:
 # Patch 1: handle non-dict schemas (LangChain tool schema incompatibility)
 try:
     import gradio_client.utils as _gcu
+
     _orig_parse = _gcu._json_schema_to_python_type
 
     def _safe_parse(schema, defs=None):
@@ -31,6 +32,7 @@ except (ImportError, AttributeError):
 # Patch 2: fix localhost check failing inside Docker (no-op on HF Spaces)
 try:
     import gradio.networking as _gnet
+
     _gnet.is_localhost_accessible = lambda: True
 except (ImportError, AttributeError):
     pass
@@ -272,6 +274,65 @@ def parse_review_table_to_theme_map(table_data) -> str:
 
 
 # ─── Gradio Application ───────────────────────────────────────────────────────
+def on_approve_all(table_data):
+    import pandas as pd
+
+    rows = (
+        table_data.values.tolist()
+        if isinstance(table_data, pd.DataFrame)
+        else list(table_data or [])
+    )
+    return [
+        [r[0], r[1], r[2], r[3], r[4], "yes", r[6], r[7]] if len(r) > 5 else r
+        for r in rows
+    ]
+
+
+def on_reject_all(table_data):
+    import pandas as pd
+
+    rows = (
+        table_data.values.tolist()
+        if isinstance(table_data, pd.DataFrame)
+        else list(table_data or [])
+    )
+    return [
+        [r[0], r[1], r[2], r[3], r[4], "no", r[6], r[7]] if len(r) > 5 else r
+        for r in rows
+    ]
+
+
+def on_auto_flag_boilerplate(table_data):
+    import pandas as pd
+
+    SIGNALS = [
+        "copyright",
+        "springer",
+        "elsevier",
+        "rights reserved",
+        "licence",
+        "open access",
+        "publisher",
+    ]
+    rows = (
+        table_data.values.tolist()
+        if isinstance(table_data, pd.DataFrame)
+        else list(table_data or [])
+    )
+
+    def flag(r):
+        if len(r) <= 5:
+            return r
+        text = (str(r[1]) + " " + str(r[2])).lower()
+        is_bp = any(s in text for s in SIGNALS)
+        row = list(r)
+        row[5] = "no" if is_bp else "yes"
+        if is_bp and not str(row[7]).strip():
+            row[7] = "Auto-flagged: boilerplate"
+        return row
+
+    return list(map(flag, rows))
+
 
 with gr.Blocks(title="BERTopic Agentic AI") as app:
 
@@ -342,6 +403,16 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                     row_count=(10, "dynamic"),
                 )
                 with gr.Row():
+                    approve_all_btn = gr.Button(
+                        "✓ Approve all", scale=1, variant="secondary"
+                    )
+                    reject_all_btn = gr.Button(
+                        "✗ Reject all", scale=1, variant="secondary"
+                    )
+                    auto_flag_btn = gr.Button(
+                        "Auto-flag boilerplate", scale=2, variant="secondary"
+                    )
+                with gr.Row():
                     run_selector = gr.Dropdown(
                         choices=["abstract", "title"],
                         value="abstract",
@@ -391,6 +462,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
 
     def on_csv_upload(file_obj, history, thread_id):
         import shutil
+
         if file_obj is None:
             return history, gr.update(), None
 
@@ -399,7 +471,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
         filename = Path(temp_path).name
         persistent_path = CHECKPOINT_DIR / filename
         shutil.copy(temp_path, persistent_path)
-        
+
         response = invoke_agent(
             agent,
             f"A CSV file has been uploaded. Please load and analyse it. File path: {persistent_path}",
@@ -462,6 +534,15 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
         fn=on_refresh_table,
         inputs=[run_selector],
         outputs=[review_table],
+    )
+    approve_all_btn.click(
+        fn=on_approve_all, inputs=[review_table], outputs=[review_table]
+    )
+    reject_all_btn.click(
+        fn=on_reject_all, inputs=[review_table], outputs=[review_table]
+    )
+    auto_flag_btn.click(
+        fn=on_auto_flag_boilerplate, inputs=[review_table], outputs=[review_table]
     )
 
     # ─── Event: Submit Review ─────────────────────────────────────────────────
