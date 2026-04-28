@@ -1,0 +1,21 @@
+name: Deploy to HuggingFace Spaces
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # lets you trigger manually from GitHub UI too
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to HuggingFace Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git push -f https://RuchirKadam1729:$HF_TOKEN@huggingface.co/spaces/RuchirKadam1729/bertopic-agentic-ai main
