@@ -134,7 +134,7 @@ def load_review_table(run_key: str = "abstract") -> list:
                     i_t[1].get("theme_name", ""),
                     f"→ {i_t[1].get('pajais_match', 'NOVEL')} | {i_t[1].get('reasoning', '')}",
                     i_t[1].get("total_sentences", ""),
-                    i_t[1].get("sub_topics", ""),
+                    i_t[1].get("paper_count", i_t[1].get("sub_topics", "")),
                     "yes",
                     "",
                     i_t[1].get("reasoning", ""),
@@ -152,6 +152,7 @@ def load_review_table(run_key: str = "abstract") -> list:
                     i_t[1].get("theme_name", ""),
                     "; ".join(i_t[1].get("representative_sentences", [])[:1]),
                     i_t[1].get("total_sentences", ""),
+                    i_t[1].get("paper_count", ""),
                     i_t[1].get("sub_topics", ""),
                     "yes",
                     "",
@@ -404,10 +405,10 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                 )
                 with gr.Row():
                     approve_all_btn = gr.Button(
-                        "✓ Approve all", scale=1, variant="secondary"
+                        "Approve all", scale=1, variant="secondary"
                     )
                     reject_all_btn = gr.Button(
-                        "✗ Reject all", scale=1, variant="secondary"
+                        "Reject all", scale=1, variant="secondary"
                     )
                     auto_flag_btn = gr.Button(
                         "Auto-flag boilerplate", scale=2, variant="secondary"
@@ -458,6 +459,44 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                 )
                 refresh_downloads_btn = gr.Button("Refresh downloads")
 
+            with gr.Tab("Phase history"):
+                gr.Markdown(
+                    "_Browse results from any completed phase. Data is read directly from checkpoints._"
+                )
+                with gr.Row():
+                    history_run = gr.Dropdown(
+                        choices=["abstract", "title"],
+                        value="abstract",
+                        label="Run",
+                        scale=1,
+                    )
+                    history_phase = gr.Dropdown(
+                        choices=[
+                            "Phase 2 — Initial codes (labels)",
+                            "Phase 3 — Themes",
+                            "Phase 5.5 — PAJAIS mapping",
+                        ],
+                        value="Phase 2 — Initial codes (labels)",
+                        label="Phase snapshot",
+                        scale=2,
+                    )
+                    load_history_btn = gr.Button("Load snapshot", scale=1)
+                history_table = gr.Dataframe(
+                    headers=REVIEW_TABLE_HEADERS,
+                    datatype=[
+                        "number",
+                        "str",
+                        "str",
+                        "number",
+                        "number",
+                        "str",
+                        "str",
+                        "str",
+                    ],
+                    interactive=False,
+                    wrap=True,
+                    row_count=(10, "dynamic"),
+                )
     # ─── Event: CSV Upload ────────────────────────────────────────────────────
 
     def on_csv_upload(file_obj, history, thread_id):
@@ -588,6 +627,11 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
         outputs=[phase_progress, review_table, download_files],
     )
 
+    load_history_btn.click(
+        fn=load_phase_snapshot,
+        inputs=[history_run, history_phase],
+        outputs=[history_table],
+    )
 
 # ─── Launch ───────────────────────────────────────────────────────────────────
 
