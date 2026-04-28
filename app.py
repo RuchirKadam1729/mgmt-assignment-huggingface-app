@@ -334,6 +334,46 @@ def on_auto_flag_boilerplate(table_data):
 
     return list(map(flag, rows))
 
+def load_phase_snapshot(run_key: str, phase_label: str) -> list:
+    phase_map = {
+        "Phase 2 — Initial codes (labels)": f"labels_{run_key}.json",
+        "Phase 3 — Themes":                 f"themes_{run_key}.json",
+        "Phase 5.5 — PAJAIS mapping":       f"taxonomy_map_{run_key}.json",
+    }
+    filename = phase_map.get(phase_label)
+    if not filename:
+        return []
+    path = CHECKPOINT_DIR / filename
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text())
+    if "labels" in filename:
+        return [[i+1,
+                 t.get("label", ""),
+                 t.get("top_sentences", [""])[0] if t.get("top_sentences") else "",
+                 t.get("size", ""),
+                 t.get("paper_count", ""),
+                 t.get("confidence", ""),
+                 "",
+                 t.get("reasoning", "")]
+                for i, t in enumerate(data[:100])]
+    if "themes" in filename:
+        return [[i+1,
+                 t.get("theme_name", ""),
+                 "; ".join(t.get("representative_sentences", [])[:1]),
+                 t.get("total_sentences", ""),
+                 t.get("paper_count", t.get("sub_topics", "")),
+                 "yes", "", ""]
+                for i, t in enumerate(data)]
+    if "taxonomy" in filename:
+        return [[i+1,
+                 t.get("theme_name", ""),
+                 f"→ {t.get('pajais_match', 'NOVEL')} | {t.get('reasoning', '')}",
+                 t.get("total_sentences", ""),
+                 t.get("paper_count", ""),
+                 "yes", "", t.get("reasoning", "")]
+                for i, t in enumerate(data)]
+    return []
 
 with gr.Blocks(title="BERTopic Agentic AI") as app:
 
