@@ -405,7 +405,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                 )
                 with gr.Row():
                     approve_all_btn = gr.Button(
-                        "Approve all", scale=1,variant="secondary"
+                        "Approve all", scale=1, variant="secondary"
                     )
                     reject_all_btn = gr.Button(
                         "Reject all", scale=1, variant="secondary"
