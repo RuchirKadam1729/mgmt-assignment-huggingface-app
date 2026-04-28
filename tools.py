@@ -179,13 +179,16 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
             "|".join(BOILERPLATE_PATTERNS), " ", text, flags=re.IGNORECASE
         ).strip()
 
+    # AFTER
     cleaned = list(map(clean_text, raw_texts))
-    sentences = [
-        s.strip()
-        for text in map(sent_tokenize, cleaned)
-        for s in text
+    sentence_paper_pairs = [
+        (s.strip(), paper_idx)
+        for paper_idx, sents in enumerate(map(sent_tokenize, cleaned))
+        for s in sents
         if len(s.strip()) > 30
     ]
+    sentences   = [p[0] for p in sentence_paper_pairs]
+    sent_paper_ids = [p[1] for p in sentence_paper_pairs]
 
     model = SentenceTransformer(EMBED_MODEL)
     embeddings = model.encode(
@@ -203,21 +206,25 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
     n_clusters = int(labels.max()) + 1
 
     unique_labels = list(range(n_clusters))
-
+    
     def get_cluster_data(cluster_id):
         mask = labels == cluster_id
         cluster_embeddings = embeddings[mask]
-        cluster_sentences = [s for s, m in zip(sentences, mask) if m]
+        cluster_sentences  = [s   for s,   m in zip(sentences,      mask) if m]
+        cluster_paper_ids  = [pid for pid, m in zip(sent_paper_ids, mask) if m]
         centroid = cluster_embeddings.mean(axis=0, keepdims=True)
         sims = cosine_similarity(centroid, cluster_embeddings)[0]
         top_idx = sims.argsort()[-NEAREST_K:][::-1]
         top_sentences = [cluster_sentences[i] for i in top_idx]
+        unique_paper_ids = list(set(cluster_paper_ids))
         return {
-            "cluster_id": cluster_id,
-            "size": int(mask.sum()),
-            "centroid": centroid[0].tolist(),
+            "cluster_id":    cluster_id,
+            "size":          int(mask.sum()),
+            "paper_count":   len(unique_paper_ids),
+            "paper_indices": unique_paper_ids,
+            "centroid":      centroid[0].tolist(),
             "top_sentences": top_sentences,
-            "label": f"Topic {cluster_id}",
+            "label":         f"Topic {cluster_id}",
         }
 
     summaries = list(map(get_cluster_data, unique_labels))
@@ -228,6 +235,10 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
     )
     np.save(CHECKPOINT_DIR / f"emb_{run_key}.npy", embeddings)
     (CHECKPOINT_DIR / f"sentences_{run_key}.json").write_text(json.dumps(sentences))
+
+    np.save(CHECKPOINT_DIR / f"emb_{run_key}.npy", embeddings)
+    (CHECKPOINT_DIR / f"sentences_{run_key}.json").write_text(json.dumps(sentences))
+    (CHECKPOINT_DIR / f"paper_ids_{run_key}.json").write_text(json.dumps(sent_paper_ids))
 
     sizes = [s["size"] for s in summaries_sorted[:30]]
     topic_names = [f"T{s['cluster_id']}" for s in summaries_sorted[:30]]
@@ -423,19 +434,22 @@ def consolidate_into_themes(run_key: str, theme_map: dict) -> str:
     def build_theme(theme_name_ids):
         theme_name, cluster_ids = theme_name_ids
         ids_set = set(map(str, cluster_ids))
-        member_topics = [
-            cluster_lookup[cid] for cid in ids_set if cid in cluster_lookup
-        ]
+        member_topics = [cluster_lookup[cid] for cid in ids_set if cid in cluster_lookup]
         all_sentences = [s for t in member_topics for s in t.get("top_sentences", [])]
         total_size = sum(t.get("size", 0) for t in member_topics)
         topic_labels = [t.get("label", f"T{t['cluster_id']}") for t in member_topics]
+        # Union of paper indices across all merged clusters → true unique paper count
+        all_paper_indices = set(
+            pid for t in member_topics for pid in t.get("paper_indices", [])
+        )
         return {
-            "theme_name": theme_name,
-            "cluster_ids": cluster_ids,
-            "merged_topic_labels": topic_labels,
-            "total_sentences": total_size,
+            "theme_name":              theme_name,
+            "cluster_ids":             cluster_ids,
+            "merged_topic_labels":     topic_labels,
+            "total_sentences":         total_size,
+            "paper_count":             len(all_paper_indices),
             "representative_sentences": all_sentences[:NEAREST_K],
-            "sub_topics": len(member_topics),
+            "sub_topics":              len(member_topics),
         }
 
     themes = list(map(build_theme, theme_map.items()))
@@ -676,17 +690,17 @@ def generate_comparison_csv() -> str:
             convergence = "CONVERGED"
         else:
             convergence = "DIVERGED"
-
+        
         return {
-            "Abstract Theme": a_name,
+            "Abstract Theme":     a_name,
             "Abstract Sentences": at.get("total_sentences", ""),
-            "Abstract Sub-Topics": at.get("sub_topics", ""),
-            "Title Theme": t_name,
-            "Title Sentences": tt.get("total_sentences", ""),
-            "Title Sub-Topics": tt.get("sub_topics", ""),
-            "Similarity": round(sim, 3) if t_name else "",
-            "Convergence": convergence,
-        }
+            "Abstract Papers":    at.get("paper_count", ""),
+            "Title Theme":        t_name,
+            "Title Sentences":    tt.get("total_sentences", ""),
+            "Title Papers":       tt.get("paper_count", ""),
+            "Similarity":         round(sim, 3) if t_name else "",
+            "Convergence":        convergence,
+}
 
     rows = list(map(make_row, final_pairs))
 
