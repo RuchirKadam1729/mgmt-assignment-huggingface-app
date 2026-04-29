@@ -455,7 +455,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                     )
                 with gr.Row():
                     run_selector = gr.Dropdown(
-                        choices=["abstract", "title"],
+                        choices=["abstract", "title", "combined"],
                         value="abstract",
                         label="Run",
                         scale=1,
@@ -472,7 +472,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                     label="Select chart",
                 )
                 chart_run_selector = gr.Dropdown(
-                    choices=["abstract", "title"],
+                    choices=["abstract", "title", "combined"],
                     value="abstract",
                     label="Run",
                 )
@@ -505,7 +505,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                 )
                 with gr.Row():
                     history_run = gr.Dropdown(
-                        choices=["abstract", "title"],
+                        choices=["abstract", "title", "combined"],
                         value="abstract",
                         label="Run",
                         scale=1,
