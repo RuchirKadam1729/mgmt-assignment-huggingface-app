@@ -21,7 +21,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_groq import ChatGroq
 from sentence_transformers import SentenceTransformer
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import cosine_similarity
 from nltk.tokenize import sent_tokenize
 import nltk
@@ -34,14 +34,27 @@ nltk.download("punkt_tab", quiet=True)
 CHECKPOINT_DIR = Path("checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
-EMBED_MODEL = "all-MiniLM-L6-v2"
-NEAREST_K = 5
-MAX_LABEL_TOPICS = 30
+EMBED_MODEL = "allenai/specter2_base"   # 768-d scientific paper embeddings
+NEAREST_K = 3                           # top 3 papers per cluster
+MAX_LABEL_TOPICS = 120                  # label up to 120 clusters
 GROQ_MODEL = "llama-3.3-70b-versatile"
+
+# DBSCAN parameters (cosine distance = 1 − cosine_similarity)
+DBSCAN_EPS = 0.35          # similarity threshold ~0.65
+DBSCAN_MIN_SAMPLES = 20    # minimum sentences to form a valid cluster
+DBSCAN_MAX_CLUSTERS = 120  # cap clusters sent to review table
+
+# Council of Agents — 3 independent labellers + 1 arbiter
+COUNCIL_MODELS = [
+    "llama-3.3-70b-versatile",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+]
 
 RUN_CONFIGS = {
     "abstract": ["Abstract"],
-    "title": ["Title"],
+    "title":    ["Title"],
+    "combined": ["Abstract", "Title"],  # NEW: joint abstract+title run
 }
 
 BOILERPLATE_PATTERNS = [
@@ -159,10 +172,10 @@ def load_scopus_csv(filepath: str) -> str:
 # ─── Tool 2: Run BERTopic Discovery AND Label ──────────────────────────────────────
 
 
-def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
-    """Embed text sentences using all-MiniLM-L6-v2, cluster with AgglomerativeClustering
-    (cosine metric, NO UMAP), find 5 nearest sentences per centroid, generate 4 Plotly charts.
-    run_key must be 'abstract' or 'title'. Saves summaries.json and emb.npy."""
+def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
+    """Embed text sentences using allenai/specter2_base (768d), cluster with DBSCAN
+    (cosine metric, min_samples=20), find top-3 nearest sentences per centroid.
+    run_key must be 'abstract', 'title', or 'combined'. Saves summaries.json and emb.npy."""
 
     df = pd.read_csv(CHECKPOINT_DIR / "data.csv")
     columns = RUN_CONFIGS[run_key]
@@ -195,17 +208,18 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
         sentences, normalize_embeddings=True, show_progress_bar=False
     )
 
-    
-    clustering = AgglomerativeClustering(
-    metric="cosine",
-    linkage="average",
-    distance_threshold=threshold,
-    n_clusters=None,
-)
+    # ── DBSCAN clustering (cosine distance, no UMAP) ─────────────────────────
+    clustering = DBSCAN(
+        eps=DBSCAN_EPS,
+        min_samples=DBSCAN_MIN_SAMPLES,
+        metric="cosine",
+        n_jobs=-1,
+    )
     labels = clustering.fit_predict(embeddings)
-    n_clusters = int(labels.max()) + 1
 
-    unique_labels = list(range(n_clusters))
+    noise_count = int((labels == -1).sum())
+    valid_cluster_ids = sorted(set(labels.tolist()) - {-1})
+    n_clusters = len(valid_cluster_ids)
     
     def get_cluster_data(cluster_id):
         mask = labels == cluster_id
@@ -227,8 +241,10 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
             "label":         f"Topic {cluster_id}",
         }
 
-    summaries = list(map(get_cluster_data, unique_labels))
+    summaries = list(map(get_cluster_data, valid_cluster_ids))
     summaries_sorted = sorted(summaries, key=lambda x: x["size"], reverse=True)
+    # Cap review table at DBSCAN_MAX_CLUSTERS (drop tiny/noisy tail clusters)
+    summaries_sorted = summaries_sorted[:DBSCAN_MAX_CLUSTERS]
 
     (CHECKPOINT_DIR / f"summaries_{run_key}.json").write_text(
         json.dumps(summaries_sorted, indent=2)
@@ -302,10 +318,12 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
 
     return (
         f"BERTopic discovery complete for run_key='{run_key}'.\n"
+        f"  Embedding model: {EMBED_MODEL} (768d)\n"
         f"  Sentences embedded: {len(sentences)}\n"
-        f"  Clusters (topics) found: {n_clusters}\n"
-        f"  Threshold used: {threshold}\n"
-        f"  Largest topic size: {summaries_sorted[0]['size']} sentences\n"
+        f"  DBSCAN eps={DBSCAN_EPS}, min_samples={DBSCAN_MIN_SAMPLES}\n"
+        f"  Valid clusters: {n_clusters}  |  Noise points discarded: {noise_count}\n"
+        f"  Clusters in review table: {len(summaries_sorted)} (top by size)\n"
+        f"  Largest cluster: {summaries_sorted[0]['size']} sentences\n"
         f"  Charts saved: chart_bar, chart_heat, chart_map\n"
         f"  Checkpoint: summaries_{run_key}.json, emb_{run_key}.npy\n"
         f"Ready for Phase 2: call label_topics_with_llm(run_key='{run_key}')"
@@ -313,88 +331,163 @@ def run_bertopic_discovery(run_key: str, threshold: float = 0.7) -> str:
 
 
 def label_topics_with_llm(run_key: str) -> str:
-    """Send top 100 topics to ChatGroq LLM for labelling. Each topic gets a label,
-    category, confidence score, reasoning, and niche flag. Saves labels.json."""
+    """Label top clusters using a Council of 3 LLMs (Llama, Mixtral, Gemma) independently,
+    then a 4th arbiter LLM picks / synthesises the best label per topic.
+    Saves labels.json with council_proposals field for transparency."""
+
+    import time
+    from itertools import chain as ichain
 
     assert (
         CHECKPOINT_DIR / f"summaries_{run_key}.json"
-    ).exists(), f"summaries_{run_key}.json not found. Call run_bertopic_discovery(run_key='{run_key}') first."
+    ).exists(), f"summaries_{run_key}.json not found. Call run_bertopic_discovery first."
+
     summaries = json.loads((CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text())
     top_topics = summaries[:MAX_LABEL_TOPICS]
 
-    llm = ChatGroq(model=GROQ_MODEL, temperature=0.1)
-
     def build_topic_text(t):
-        sentences_text = "\n".join([f"  - {s}" for s in t["top_sentences"][:3]])
-        return f"TOPIC {t['cluster_id']} (size={t['size']}):\n{sentences_text}"
+        sents = "\n".join([f"  - {s}" for s in t["top_sentences"][:NEAREST_K]])
+        return f"TOPIC {t['cluster_id']} (size={t['size']}, papers={t['paper_count']}):\n{sents}"
 
     topics_text = "\n\n".join(list(map(build_topic_text, top_topics)))
 
-    prompt = PromptTemplate.from_template(
-        """You are a computational thematic analysis expert. Label each research topic based on its representative sentences.
+    labeling_prompt = PromptTemplate.from_template(
+        """You are a computational thematic analysis expert. Label each research topic.
 
-For each topic, return a JSON object with exactly these fields:
+For each topic return a JSON object with:
 - "cluster_id": integer
-- "label": short research area name (3-6 words)
-- "category": broader research category
+- "label": short research area name (3-6 words, academic)
+- "category": broader IS/IT research category
 - "confidence": float 0-1
-- "reasoning": one sentence explanation
-- "niche": boolean (true if very specialised, false if mainstream)
+- "reasoning": one sentence
+- "niche": boolean
 
-Return ONLY a JSON array of objects, no preamble, no markdown, no backticks.
+Return ONLY a JSON array — no preamble, no markdown, no backticks.
 
-Topics to label:
+Topics:
 {topics_text}
 """
     )
 
     parser = JsonOutputParser()
-    chain = prompt | llm | parser
-    result = chain.invoke({"topics_text": topics_text})
 
-    labeled = {str(item["cluster_id"]): item for item in result}
-    enriched = list(
-        map(
-            lambda s: {
-                **s,
-                **labeled.get(
-                    str(s["cluster_id"]),
-                    {
-                        "label": f"Topic {s['cluster_id']}",
-                        "confidence": 0.5,
-                        "reasoning": "Not labeled",
-                        "niche": False,
-                    },
-                ),
-            },
-            summaries,
-        )
+    # ── Step 1: Three independent LLM labellers ──────────────────────────────
+    def get_labels_from_model(idx_model):
+        idx, model_name = idx_model
+        time.sleep(idx * 4)          # stagger to stay under Groq TPM limits
+        llm = ChatGroq(model=model_name, temperature=0.1)
+        chain = labeling_prompt | llm | parser
+        result = chain.invoke({"topics_text": topics_text})
+        return result if isinstance(result, list) else []
+
+    all_model_results = list(map(get_labels_from_model, enumerate(COUNCIL_MODELS)))
+
+    # ── Step 2: Collect 3 proposals per cluster ──────────────────────────────
+    def get_one_proposal(result_list, cid_str):
+        matches = list(filter(
+            lambda item: isinstance(item, dict) and str(item.get("cluster_id")) == cid_str,
+            result_list,
+        ))
+        return matches[0] if matches else {"label": "Unlabeled", "reasoning": "", "confidence": 0.5}
+
+    def collect_proposals(topic):
+        cid_str = str(topic["cluster_id"])
+        proposals = list(map(
+            lambda res: get_one_proposal(res, cid_str),
+            all_model_results,
+        ))
+        return {"cluster_id": topic["cluster_id"], "size": topic["size"], "proposals": proposals}
+
+    per_topic_proposals = list(map(collect_proposals, top_topics))
+
+    # ── Step 3: Council arbiter picks best label ─────────────────────────────
+    council_prompt = PromptTemplate.from_template(
+        """You are the council arbiter for a research topic labelling panel.
+Three AI models independently proposed a label for each topic.
+Pick or synthesise the BEST label — prefer: (a) precise, (b) academic terminology, (c) distinctive.
+
+{proposals_text}
+
+Return ONLY a JSON array:
+[{{"cluster_id": int, "label": str, "confidence": float, "reasoning": str, "winning_model": int}}]
+winning_model: 1=Llama, 2=Mixtral, 3=Gemma, 0=synthesised.
+No preamble, no markdown, no backticks.
+"""
     )
 
-    (CHECKPOINT_DIR / f"labels_{run_key}.json").write_text(
-        json.dumps(enriched, indent=2)
-    )
+    council_llm = ChatGroq(model=GROQ_MODEL, temperature=0.0)
+    council_chain = council_prompt | council_llm | parser
 
-    sample = enriched[:5]
-    sample_text = "\n".join(
-        [
-            f"  T{t['cluster_id']}: {t.get('label','?')} (conf={t.get('confidence',0):.2f})"
-            for t in sample
-        ]
-    )
+    COUNCIL_BATCH = 20
+
+    def format_proposal_block(p):
+        rows = list(map(
+            lambda idx_prop: f"  Model {idx_prop[0]+1}: {idx_prop[1].get('label','?')} | {idx_prop[1].get('reasoning','')}",
+            enumerate(p["proposals"]),
+        ))
+        return f"TOPIC {p['cluster_id']} (size={p['size']}):\n" + "\n".join(rows)
+
+    def process_council_batch(batch):
+        proposals_text = "\n\n".join(list(map(format_proposal_block, batch)))
+        result = council_chain.invoke({"proposals_text": proposals_text})
+        time.sleep(2)
+        return result if isinstance(result, list) else []
+
+    batches = [per_topic_proposals[i : i + COUNCIL_BATCH]
+               for i in range(0, len(per_topic_proposals), COUNCIL_BATCH)]
+    council_batches = list(map(process_council_batch, batches))
+
+    council_results = list(filter(
+        lambda item: isinstance(item, dict) and "cluster_id" in item,
+        ichain.from_iterable(council_batches),
+    ))
+    council_lookup = {str(item["cluster_id"]): item for item in council_results}
+
+    # ── Step 4: Merge council decisions with full summaries ──────────────────
+    def merge_with_council(s):
+        cid_str = str(s["cluster_id"])
+        council = council_lookup.get(cid_str, {
+            "label": f"Topic {s['cluster_id']}",
+            "confidence": 0.5,
+            "reasoning": "Council: no decision",
+            "winning_model": 0,
+        })
+        matched_proposals = list(filter(
+            lambda p: p["cluster_id"] == s["cluster_id"], per_topic_proposals
+        ))
+        proposal_labels = list(map(
+            lambda prop: prop.get("label", ""),
+            matched_proposals[0]["proposals"] if matched_proposals else [],
+        ))
+        return {**s, **council, "council_proposals": proposal_labels}
+
+    enriched = list(map(merge_with_council, summaries))
+    (CHECKPOINT_DIR / f"labels_{run_key}.json").write_text(json.dumps(enriched, indent=2))
+
+    sample_text = "\n".join([
+        f"  T{t['cluster_id']}: {t.get('label','?')}  [won=Model {t.get('winning_model',0)}]  "
+        f"conf={t.get('confidence',0):.2f}  proposals={t.get('council_proposals',[][:3])}"
+        for t in enriched[:5]
+    ])
+    winning = [r.get("winning_model", 0) for r in council_results]
+    model_wins = {m: winning.count(i+1) for i, m in enumerate(["Llama", "Mixtral", "Gemma"])}
+    synth_count = winning.count(0)
 
     return (
-        f"Topics labeled successfully for run_key='{run_key}'.\n"
-        f"  Topics labeled: {len(result)}/{len(top_topics)}\n"
-        f"  Sample labels:\n{sample_text}\n"
+        f"Council labelling complete for run_key='{run_key}'.\n"
+        f"  Council: {', '.join(COUNCIL_MODELS)}\n"
+        f"  Arbiter decisions: {len(council_results)}/{len(top_topics)}\n"
+        f"  Model wins → {model_wins}  |  Synthesised: {synth_count}\n"
+        f"  Sample:\n{sample_text}\n"
         f"  Checkpoint: labels_{run_key}.json\n"
-        f"The review table will now populate. Researcher should review, set Approve=yes/no and Rename To values."
+        f"Review table ready. Set Approve/Rename, then click Submit Review."
     )
 
 
 @tool
-def run_bertopic_and_label(run_key: str, threshold: float = 0.7) -> str:
-    """Run BERTopic discovery AND label topics with LLM in one step."""
+def run_bertopic_and_label(run_key: str, threshold: float = DBSCAN_EPS) -> str:
+    """Run DBSCAN-based BERTopic discovery AND council-of-3-LLMs labelling in one step.
+    run_key must be 'abstract', 'title', or 'combined' (abstract+title together)."""
     discovery_result = run_bertopic_discovery(run_key, threshold)
     label_result = label_topics_with_llm(run_key)
     return discovery_result + "\n\n" + label_result
