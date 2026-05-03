@@ -48,7 +48,7 @@ DBSCAN_MAX_CLUSTERS = 120  # cap clusters sent to review table
 COUNCIL_MODELS = [
     "llama-3.3-70b-versatile",   # primary — high quality
     "llama-3.1-8b-instant",      # fast lightweight voice
-    "qwen/qwen3-32b",            # different architecture for diversity
+    "meta-llama/llama-4-scout-17b-16e-instruct",    # Llama 4 — MoE, fundamentally different architecture
 ]
 
 RUN_CONFIGS = {
