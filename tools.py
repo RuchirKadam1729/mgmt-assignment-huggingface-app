@@ -46,9 +46,9 @@ DBSCAN_MAX_CLUSTERS = 120  # cap clusters sent to review table
 
 # Council of Agents — 3 independent labellers + 1 arbiter
 COUNCIL_MODELS = [
-    "llama-3.3-70b-versatile",
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
+    "llama-3.3-70b-versatile",   # primary — high quality
+    "llama-3.1-8b-instant",      # fast lightweight voice
+    "qwen/qwen3-32b",            # different architecture for diversity
 ]
 
 RUN_CONFIGS = {
