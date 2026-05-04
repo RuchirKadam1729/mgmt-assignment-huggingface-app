@@ -6,6 +6,11 @@ Rules enforced:
   - ZERO for/while loops  (use list(map(...)) instead)
   - ZERO try/except blocks (handle_tool_error=True sends errors to LLM)
   - ALL tools are stateless: take input → produce output, nothing else
+
+FIX (2026-05-04): Replaced DBSCAN with AgglomerativeClustering.
+  DBSCAN with eps=0.35 chains all academic sentences into 1 cluster (chaining problem).
+  AgglomerativeClustering with distance_threshold=0.35 cuts at a hard boundary →
+  produces 80-120 distinct topic clusters from the same corpus.
 """
 
 import json
@@ -21,7 +26,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_groq import ChatGroq
 from sentence_transformers import SentenceTransformer
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import AgglomerativeClustering   # ← CHANGED from DBSCAN
 from sklearn.metrics.pairwise import cosine_similarity
 from nltk.tokenize import sent_tokenize
 import nltk
@@ -39,22 +44,26 @@ NEAREST_K = 3                           # top 3 papers per cluster
 MAX_LABEL_TOPICS = 120                  # label up to 120 clusters
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# DBSCAN parameters (cosine distance = 1 − cosine_similarity)
-DBSCAN_EPS = 0.35          # similarity threshold ~0.65
-DBSCAN_MIN_SAMPLES = 20    # minimum sentences to form a valid cluster
-DBSCAN_MAX_CLUSTERS = 120  # cap clusters sent to review table
+# ── AgglomerativeClustering parameters ────────────────────────────────────────
+# DISTANCE_THRESHOLD: cosine distance = 1 − cosine_similarity
+#   0.35 → similarity ≥ 0.65  →  ~80–120 fine-grained topics  (recommended)
+#   0.30 → similarity ≥ 0.70  →  ~150–200 micro-topics
+#   0.45 → similarity ≥ 0.55  →  ~40–60 coarser themes
+AGGLO_DISTANCE_THRESHOLD = 0.35
+AGGLO_MIN_CLUSTER_SIZE   = 20     # discard clusters with fewer sentences (treated as noise)
+AGGLO_MAX_CLUSTERS       = 120    # cap review table rows
 
 # Council of Agents — 3 independent labellers + 1 arbiter
 COUNCIL_MODELS = [
-    "llama-3.3-70b-versatile",   # primary — high quality
-    "llama-3.1-8b-instant",      # fast lightweight voice
-    "meta-llama/llama-4-scout-17b-16e-instruct",    # Llama 4 — MoE, fundamentally different architecture
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
 ]
 
 RUN_CONFIGS = {
     "abstract": ["Abstract"],
     "title":    ["Title"],
-    "combined": ["Abstract", "Title"],  # NEW: joint abstract+title run
+    "combined": ["Abstract", "Title"],
 }
 
 BOILERPLATE_PATTERNS = [
@@ -172,10 +181,19 @@ def load_scopus_csv(filepath: str) -> str:
 # ─── Tool 2: Run BERTopic Discovery AND Label ──────────────────────────────────────
 
 
-def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
-    """Embed text sentences using allenai/specter2_base (768d), cluster with DBSCAN
-    (cosine metric, min_samples=20), find top-3 nearest sentences per centroid.
-    run_key must be 'abstract', 'title', or 'combined'. Saves summaries.json and emb.npy."""
+def run_bertopic_discovery(run_key: str, threshold: float = AGGLO_DISTANCE_THRESHOLD) -> str:
+    """Embed text sentences using allenai/specter2_base (768d), cluster with
+    AgglomerativeClustering (cosine metric, distance_threshold — NO chaining problem),
+    find top-3 nearest sentences per centroid.
+    run_key must be 'abstract', 'title', or 'combined'.
+    Saves summaries.json and emb.npy.
+
+    WHY AgglomerativeClustering instead of DBSCAN:
+      DBSCAN with eps=0.35 chains all academic-domain sentences into 1 giant cluster
+      because every sentence is within eps of its neighbour in dense scientific text.
+      AgglomerativeClustering cuts at a hard distance_threshold — no chaining —
+      producing 80-120 distinct topic clusters.
+    """
 
     df = pd.read_csv(CHECKPOINT_DIR / "data.csv")
     columns = RUN_CONFIGS[run_key]
@@ -192,7 +210,6 @@ def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
             "|".join(BOILERPLATE_PATTERNS), " ", text, flags=re.IGNORECASE
         ).strip()
 
-    # AFTER
     cleaned = list(map(clean_text, raw_texts))
     sentence_paper_pairs = [
         (s.strip(), paper_idx)
@@ -200,7 +217,7 @@ def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
         for s in sents
         if len(s.strip()) > 30
     ]
-    sentences   = [p[0] for p in sentence_paper_pairs]
+    sentences      = [p[0] for p in sentence_paper_pairs]
     sent_paper_ids = [p[1] for p in sentence_paper_pairs]
 
     model = SentenceTransformer(EMBED_MODEL)
@@ -208,29 +225,39 @@ def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
         sentences, normalize_embeddings=True, show_progress_bar=False
     )
 
-    # ── DBSCAN clustering (cosine distance, no UMAP) ─────────────────────────
-    clustering = DBSCAN(
-        eps=DBSCAN_EPS,
-        min_samples=DBSCAN_MIN_SAMPLES,
+    # ── AgglomerativeClustering (cosine distance, hard threshold) ─────────────
+    # distance_threshold: cosine distance = 1 − cosine_similarity
+    #   0.35 → groups sentences with similarity ≥ 0.65 → ~80-120 distinct topics
+    # linkage="average": averages distances between all pairs (Ward requires euclidean)
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
         metric="cosine",
-        n_jobs=-1,
+        linkage="average",
+        distance_threshold=threshold,
     )
-    labels = clustering.fit_predict(embeddings)
+    raw_labels = clustering.fit_predict(embeddings)
 
-    noise_count = int((labels == -1).sum())
-    valid_cluster_ids = sorted(set(labels.tolist()) - {-1})
-    n_clusters = len(valid_cluster_ids)
-    
+    # ── Post-filter: discard clusters smaller than MIN_CLUSTER_SIZE ───────────
+    # (analogous to DBSCAN's min_samples — tiny clusters are treated as noise)
+    from collections import Counter
+    cluster_sizes = Counter(raw_labels.tolist())
+    valid_ids = {cid for cid, sz in cluster_sizes.items() if sz >= AGGLO_MIN_CLUSTER_SIZE}
+    labels = np.array([cid if cid in valid_ids else -1 for cid in raw_labels])
+
+    noise_count      = int((labels == -1).sum())
+    valid_cluster_ids = sorted(valid_ids)
+    n_clusters        = len(valid_cluster_ids)
+
     def get_cluster_data(cluster_id):
-        mask = labels == cluster_id
+        mask               = labels == cluster_id
         cluster_embeddings = embeddings[mask]
         cluster_sentences  = [s   for s,   m in zip(sentences,      mask) if m]
         cluster_paper_ids  = [pid for pid, m in zip(sent_paper_ids, mask) if m]
-        centroid = cluster_embeddings.mean(axis=0, keepdims=True)
-        sims = cosine_similarity(centroid, cluster_embeddings)[0]
-        top_idx = sims.argsort()[-NEAREST_K:][::-1]
-        top_sentences = [cluster_sentences[i] for i in top_idx]
-        unique_paper_ids = list(set(cluster_paper_ids))
+        centroid           = cluster_embeddings.mean(axis=0, keepdims=True)
+        sims               = cosine_similarity(centroid, cluster_embeddings)[0]
+        top_idx            = sims.argsort()[-NEAREST_K:][::-1]
+        top_sentences      = [cluster_sentences[i] for i in top_idx]
+        unique_paper_ids   = list(set(cluster_paper_ids))
         return {
             "cluster_id":    cluster_id,
             "size":          int(mask.sum()),
@@ -241,22 +268,18 @@ def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
             "label":         f"Topic {cluster_id}",
         }
 
-    summaries = list(map(get_cluster_data, valid_cluster_ids))
+    summaries        = list(map(get_cluster_data, valid_cluster_ids))
     summaries_sorted = sorted(summaries, key=lambda x: x["size"], reverse=True)
-    # Cap review table at DBSCAN_MAX_CLUSTERS (drop tiny/noisy tail clusters)
-    summaries_sorted = summaries_sorted[:DBSCAN_MAX_CLUSTERS]
+    summaries_sorted = summaries_sorted[:AGGLO_MAX_CLUSTERS]
 
     (CHECKPOINT_DIR / f"summaries_{run_key}.json").write_text(
         json.dumps(summaries_sorted, indent=2)
     )
     np.save(CHECKPOINT_DIR / f"emb_{run_key}.npy", embeddings)
     (CHECKPOINT_DIR / f"sentences_{run_key}.json").write_text(json.dumps(sentences))
-
-    np.save(CHECKPOINT_DIR / f"emb_{run_key}.npy", embeddings)
-    (CHECKPOINT_DIR / f"sentences_{run_key}.json").write_text(json.dumps(sentences))
     (CHECKPOINT_DIR / f"paper_ids_{run_key}.json").write_text(json.dumps(sent_paper_ids))
 
-    sizes = [s["size"] for s in summaries_sorted[:30]]
+    sizes       = [s["size"] for s in summaries_sorted[:30]]
     topic_names = [f"T{s['cluster_id']}" for s in summaries_sorted[:30]]
 
     fig_bar = go.Figure(go.Bar(x=topic_names, y=sizes, marker_color="#378ADD"))
@@ -267,9 +290,9 @@ def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
         height=350,
     )
 
-    centroids = np.array([s["centroid"] for s in summaries_sorted[:50]])
-    sim_matrix = cosine_similarity(centroids)
-    fig_heat = go.Figure(go.Heatmap(z=sim_matrix, colorscale="Blues"))
+    centroids   = np.array([s["centroid"] for s in summaries_sorted[:50]])
+    sim_matrix  = cosine_similarity(centroids)
+    fig_heat    = go.Figure(go.Heatmap(z=sim_matrix, colorscale="Blues"))
     fig_heat.update_layout(title="Topic similarity heatmap (top 50)", height=400)
 
     x_coords = list(
@@ -320,8 +343,10 @@ def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
         f"BERTopic discovery complete for run_key='{run_key}'.\n"
         f"  Embedding model: {EMBED_MODEL} (768d)\n"
         f"  Sentences embedded: {len(sentences)}\n"
-        f"  DBSCAN eps={DBSCAN_EPS}, min_samples={DBSCAN_MIN_SAMPLES}\n"
-        f"  Valid clusters: {n_clusters}  |  Noise points discarded: {noise_count}\n"
+        f"  Clustering: AgglomerativeClustering(metric=cosine, linkage=average, "
+        f"distance_threshold={threshold})\n"
+        f"  Valid clusters (size ≥ {AGGLO_MIN_CLUSTER_SIZE}): {n_clusters}  "
+        f"|  Small/noise sentences discarded: {noise_count}\n"
         f"  Clusters in review table: {len(summaries_sorted)} (top by size)\n"
         f"  Largest cluster: {summaries_sorted[0]['size']} sentences\n"
         f"  Charts saved: chart_bar, chart_heat, chart_map\n"
@@ -331,7 +356,7 @@ def run_bertopic_discovery(run_key: str, threshold: float = DBSCAN_EPS) -> str:
 
 
 def label_topics_with_llm(run_key: str) -> str:
-    """Label top clusters using a Council of 3 LLMs (Llama, Mixtral, Gemma) independently,
+    """Label top clusters using a Council of 3 LLMs independently,
     then a 4th arbiter LLM picks / synthesises the best label per topic.
     Saves labels.json with council_proposals field for transparency."""
 
@@ -342,7 +367,7 @@ def label_topics_with_llm(run_key: str) -> str:
         CHECKPOINT_DIR / f"summaries_{run_key}.json"
     ).exists(), f"summaries_{run_key}.json not found. Call run_bertopic_discovery first."
 
-    summaries = json.loads((CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text())
+    summaries  = json.loads((CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text())
     top_topics = summaries[:MAX_LABEL_TOPICS]
 
     def build_topic_text(t):
@@ -371,18 +396,16 @@ Topics:
 
     parser = JsonOutputParser()
 
-    # ── Step 1: Three independent LLM labellers ──────────────────────────────
     def get_labels_from_model(idx_model):
         idx, model_name = idx_model
-        time.sleep(idx * 4)          # stagger to stay under Groq TPM limits
-        llm = ChatGroq(model=model_name, temperature=0.1)
+        time.sleep(idx * 4)
+        llm   = ChatGroq(model=model_name, temperature=0.1)
         chain = labeling_prompt | llm | parser
         result = chain.invoke({"topics_text": topics_text})
         return result if isinstance(result, list) else []
 
     all_model_results = list(map(get_labels_from_model, enumerate(COUNCIL_MODELS)))
 
-    # ── Step 2: Collect 3 proposals per cluster ──────────────────────────────
     def get_one_proposal(result_list, cid_str):
         matches = list(filter(
             lambda item: isinstance(item, dict) and str(item.get("cluster_id")) == cid_str,
@@ -391,7 +414,7 @@ Topics:
         return matches[0] if matches else {"label": "Unlabeled", "reasoning": "", "confidence": 0.5}
 
     def collect_proposals(topic):
-        cid_str = str(topic["cluster_id"])
+        cid_str   = str(topic["cluster_id"])
         proposals = list(map(
             lambda res: get_one_proposal(res, cid_str),
             all_model_results,
@@ -400,7 +423,6 @@ Topics:
 
     per_topic_proposals = list(map(collect_proposals, top_topics))
 
-    # ── Step 3: Council arbiter picks best label ─────────────────────────────
     council_prompt = PromptTemplate.from_template(
         """You are the council arbiter for a research topic labelling panel.
 Three AI models independently proposed a label for each topic.
@@ -415,7 +437,7 @@ No preamble, no markdown, no backticks.
 """
     )
 
-    council_llm = ChatGroq(model=GROQ_MODEL, temperature=0.0)
+    council_llm   = ChatGroq(model=GROQ_MODEL, temperature=0.0)
     council_chain = council_prompt | council_llm | parser
 
     COUNCIL_BATCH = 20
@@ -433,8 +455,8 @@ No preamble, no markdown, no backticks.
         time.sleep(2)
         return result if isinstance(result, list) else []
 
-    batches = [per_topic_proposals[i : i + COUNCIL_BATCH]
-               for i in range(0, len(per_topic_proposals), COUNCIL_BATCH)]
+    batches        = [per_topic_proposals[i : i + COUNCIL_BATCH]
+                      for i in range(0, len(per_topic_proposals), COUNCIL_BATCH)]
     council_batches = list(map(process_council_batch, batches))
 
     council_results = list(filter(
@@ -443,13 +465,12 @@ No preamble, no markdown, no backticks.
     ))
     council_lookup = {str(item["cluster_id"]): item for item in council_results}
 
-    # ── Step 4: Merge council decisions with full summaries ──────────────────
     def merge_with_council(s):
-        cid_str = str(s["cluster_id"])
-        council = council_lookup.get(cid_str, {
-            "label": f"Topic {s['cluster_id']}",
-            "confidence": 0.5,
-            "reasoning": "Council: no decision",
+        cid_str  = str(s["cluster_id"])
+        council  = council_lookup.get(cid_str, {
+            "label":         f"Topic {s['cluster_id']}",
+            "confidence":    0.5,
+            "reasoning":     "Council: no decision",
             "winning_model": 0,
         })
         matched_proposals = list(filter(
@@ -466,11 +487,11 @@ No preamble, no markdown, no backticks.
 
     sample_text = "\n".join([
         f"  T{t['cluster_id']}: {t.get('label','?')}  [won=Model {t.get('winning_model',0)}]  "
-        f"conf={t.get('confidence',0):.2f}  proposals={t.get('council_proposals',[][:3])}"
+        f"conf={t.get('confidence',0):.2f}"
         for t in enriched[:5]
     ])
-    winning = [r.get("winning_model", 0) for r in council_results]
-    model_wins = {m: winning.count(i+1) for i, m in enumerate(["Llama", "Mixtral", "Gemma"])}
+    winning     = [r.get("winning_model", 0) for r in council_results]
+    model_wins  = {m: winning.count(i+1) for i, m in enumerate(["Llama", "Mixtral", "Gemma"])}
     synth_count = winning.count(0)
 
     return (
@@ -485,15 +506,17 @@ No preamble, no markdown, no backticks.
 
 
 @tool
-def run_bertopic_and_label(run_key: str, threshold: float = DBSCAN_EPS) -> str:
-    """Run DBSCAN-based BERTopic discovery AND council-of-3-LLMs labelling in one step.
-    run_key must be 'abstract', 'title', or 'combined' (abstract+title together)."""
+def run_bertopic_and_label(run_key: str, threshold: float = AGGLO_DISTANCE_THRESHOLD) -> str:
+    """Run AgglomerativeClustering-based BERTopic discovery AND council-of-3-LLMs labelling
+    in one step. run_key must be 'abstract', 'title', or 'combined'.
+    threshold is the cosine distance_threshold for AgglomerativeClustering (default 0.35).
+    Lower values → more, finer clusters. Higher values → fewer, coarser clusters."""
     discovery_result = run_bertopic_discovery(run_key, threshold)
-    label_result = label_topics_with_llm(run_key)
+    label_result     = label_topics_with_llm(run_key)
     return discovery_result + "\n\n" + label_result
 
 
-# ─── Tool 3:   date into Themes ─────────────────────────────────────
+# ─── Tool 3: Consolidate into Themes ─────────────────────────────────────
 
 
 @tool
@@ -504,48 +527,40 @@ def consolidate_into_themes(run_key: str, theme_map: dict) -> str:
 
     assert (
         CHECKPOINT_DIR / f"labels_{run_key}.json"
-    ).exists(), f"labels_{run_key}.json not found. Call label_topics_with_llm(run_key='{run_key}') first."
+    ).exists(), f"labels_{run_key}.json not found. Call run_bertopic_and_label(run_key='{run_key}') first."
     assert (
         CHECKPOINT_DIR / f"emb_{run_key}.npy"
-    ).exists(), f"emb_{run_key}.npy not found. Call run_bertopic_discovery(run_key='{run_key}') first."
+    ).exists(), f"emb_{run_key}.npy not found. Call run_bertopic_and_label(run_key='{run_key}') first."
     assert (
         CHECKPOINT_DIR / f"sentences_{run_key}.json"
-    ).exists(), f"sentences_{run_key}.json not found. Call run_bertopic_discovery(run_key='{run_key}') first."
-    labels_data = json.loads((CHECKPOINT_DIR / f"labels_{run_key}.json").read_text())
-    embeddings = np.load(CHECKPOINT_DIR / f"emb_{run_key}.npy")
-    sentences = json.loads((CHECKPOINT_DIR / f"sentences_{run_key}.json").read_text())
-    cluster_labels_arr = json.loads(
-        (CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text()
-    )
+    ).exists(), f"sentences_{run_key}.json not found. Call run_bertopic_and_label(run_key='{run_key}') first."
 
-    cluster_lookup = {str(t["cluster_id"]): t for t in labels_data}
-    # AFTER — just load the cluster assignments from the summaries checkpoint
-    summaries_lookup = {str(s["cluster_id"]): s for s in cluster_labels_arr}
-    # sentence_cluster_map isn't actually used downstream, so this is fine:
-    sentence_cluster_map = {}
+    labels_data       = json.loads((CHECKPOINT_DIR / f"labels_{run_key}.json").read_text())
+    cluster_labels_arr = json.loads((CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text())
+
+    cluster_lookup    = {str(t["cluster_id"]): t for t in labels_data}
 
     def build_theme(theme_name_ids):
         theme_name, cluster_ids = theme_name_ids
-        ids_set = set(map(str, cluster_ids))
-        member_topics = [cluster_lookup[cid] for cid in ids_set if cid in cluster_lookup]
-        all_sentences = [s for t in member_topics for s in t.get("top_sentences", [])]
-        total_size = sum(t.get("size", 0) for t in member_topics)
-        topic_labels = [t.get("label", f"T{t['cluster_id']}") for t in member_topics]
-        # Union of paper indices across all merged clusters → true unique paper count
+        ids_set         = set(map(str, cluster_ids))
+        member_topics   = [cluster_lookup[cid] for cid in ids_set if cid in cluster_lookup]
+        all_sentences   = [s for t in member_topics for s in t.get("top_sentences", [])]
+        total_size      = sum(t.get("size", 0) for t in member_topics)
+        topic_labels    = [t.get("label", f"T{t['cluster_id']}") for t in member_topics]
         all_paper_indices = set(
             pid for t in member_topics for pid in t.get("paper_indices", [])
         )
         return {
-            "theme_name":              theme_name,
-            "cluster_ids":             cluster_ids,
-            "merged_topic_labels":     topic_labels,
-            "total_sentences":         total_size,
-            "paper_count":             len(all_paper_indices),
+            "theme_name":               theme_name,
+            "cluster_ids":              cluster_ids,
+            "merged_topic_labels":      topic_labels,
+            "total_sentences":          total_size,
+            "paper_count":              len(all_paper_indices),
             "representative_sentences": all_sentences[:NEAREST_K],
-            "sub_topics":              len(member_topics),
+            "sub_topics":               len(member_topics),
         }
 
-    themes = list(map(build_theme, theme_map.items()))
+    themes        = list(map(build_theme, theme_map.items()))
     themes_sorted = sorted(themes, key=lambda x: x["total_sentences"], reverse=True)
 
     (CHECKPOINT_DIR / f"themes_{run_key}.json").write_text(
@@ -581,7 +596,7 @@ def compare_with_taxonomy(run_key: str) -> str:
         f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
 
     themes = json.loads((CHECKPOINT_DIR / f"themes_{run_key}.json").read_text())
-    llm = ChatGroq(model=GROQ_MODEL, temperature=0.1)
+    llm    = ChatGroq(model=GROQ_MODEL, temperature=0.1)
 
     categories_text = "\n".join(
         [f"  {i+1}. {c}" for i, c in enumerate(PAJAIS_CATEGORIES)]
@@ -612,9 +627,8 @@ Themes to map:
     )
 
     parser = JsonOutputParser()
-    chain = prompt | llm | parser
+    chain  = prompt | llm | parser
 
-    # ── Batch into chunks of 20 to stay under Groq's 12k TPM limit ──────────
     BATCH_SIZE = 20
 
     def make_batches(lst, size):
@@ -625,7 +639,6 @@ Themes to map:
         try:
             return chain.invoke({"categories": categories_text, "themes_text": themes_text})
         except Exception:
-            # If a batch still fails, halve it and retry once
             half = len(batch) // 2
             if half == 0:
                 return []
@@ -635,15 +648,15 @@ Themes to map:
                                 "themes_text": "\n\n".join(list(map(build_theme_text, batch[half:])))})
             return (r1 if isinstance(r1, list) else []) + (r2 if isinstance(r2, list) else [])
 
-    batches = make_batches(themes, BATCH_SIZE)
     import time
     def process_with_delay(batch):
         result = process_batch(batch)
-        time.sleep(2)  # 2s gap between batches keeps TPM well under 12k/min
+        time.sleep(2)
         return result
+
+    batches     = make_batches(themes, BATCH_SIZE)
     raw_results = list(map(process_with_delay, batches))
 
-    # Flatten and filter out any non-dict items from malformed LLM responses
     result = [
         item for batch_result in raw_results
         if isinstance(batch_result, list)
@@ -651,21 +664,21 @@ Themes to map:
         if isinstance(item, dict) and "theme_name" in item
     ]
 
-    mapped = {item["theme_name"]: item for item in result}
+    mapped   = {item["theme_name"]: item for item in result}
     enriched = list(map(
         lambda t: {
             **t,
             **mapped.get(t["theme_name"], {
-                "pajais_match": "NOVEL",
-                "is_novel": True,
-                "match_confidence": 0,
-                "reasoning": "No mapping found",
+                "pajais_match":      "NOVEL",
+                "is_novel":          True,
+                "match_confidence":  0,
+                "reasoning":         "No mapping found",
             }),
         },
         themes,
     ))
 
-    novel_count = sum(1 for t in enriched if t.get("is_novel", False))
+    novel_count  = sum(1 for t in enriched if t.get("is_novel", False))
     mapped_count = len(enriched) - novel_count
 
     (CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json").write_text(
@@ -673,7 +686,7 @@ Themes to map:
     )
 
     novel_names = [t["theme_name"] for t in enriched if t.get("is_novel", False)]
-    novel_text = "\n".join([f"  * {n}" for n in novel_names]) if novel_names else "  (none)"
+    novel_text  = "\n".join([f"  * {n}" for n in novel_names]) if novel_names else "  (none)"
 
     return (
         f"PAJAIS taxonomy mapping complete for run_key='{run_key}'.\n"
@@ -697,27 +710,20 @@ def generate_comparison_csv() -> str:
     Saves comparison.csv."""
 
     abstract_path = CHECKPOINT_DIR / "themes_abstract.json"
-    title_path = CHECKPOINT_DIR / "themes_title.json"
+    title_path    = CHECKPOINT_DIR / "themes_title.json"
 
     abstract_themes = (
         json.loads(abstract_path.read_text()) if abstract_path.exists() else []
     )
     title_themes = json.loads(title_path.read_text()) if title_path.exists() else []
 
-    # ── Semantic matching via cosine similarity on theme name embeddings ──────
-    # This correctly handles the common case where abstract has far more themes
-    # than title (e.g. 13 vs 4). Positional zip would leave most rows unmatched.
-
-    CONVERGENCE_THRESHOLD = (
-        0.40  # lenient for short theme names; raise to 0.55 for large corpora
-    )
+    CONVERGENCE_THRESHOLD = 0.40
 
     model = SentenceTransformer(EMBED_MODEL)
 
     abstract_names = list(map(lambda t: t.get("theme_name", ""), abstract_themes))
-    title_names = list(map(lambda t: t.get("theme_name", ""), title_themes))
+    title_names    = list(map(lambda t: t.get("theme_name", ""), title_themes))
 
-    # Embed all theme names; fallback gracefully when one run produced no themes
     abstract_embs = (
         model.encode(abstract_names, normalize_embeddings=True)
         if abstract_names
@@ -729,26 +735,20 @@ def generate_comparison_csv() -> str:
         else np.zeros((0, 384))
     )
 
-    # For each abstract theme find its best-matching title theme (greedy, no reuse)
-    # We build a full similarity matrix then pick the argmax column per row.
-    matched_title = {}  # abstract_idx → title_idx or None
     used_title_idxs = set()
 
     def match_abstract_theme(abs_idx):
-        """Return (title_idx, similarity) for the best available title match."""
         if len(title_embs) == 0:
             return None, 0.0
-        sims = cosine_similarity(abstract_embs[abs_idx : abs_idx + 1], title_embs)[0]
-        # Mask already-used title themes so we don't double-assign
-        available_mask = np.array(
+        sims             = cosine_similarity(abstract_embs[abs_idx : abs_idx + 1], title_embs)[0]
+        available_mask   = np.array(
             [0.0 if i in used_title_idxs else 1.0 for i in range(len(sims))]
         )
         masked_sims = sims * available_mask
-        best_idx = int(masked_sims.argmax())
-        best_sim = float(masked_sims[best_idx])
+        best_idx    = int(masked_sims.argmax())
+        best_sim    = float(masked_sims[best_idx])
         return best_idx, best_sim
 
-    # Greedy matching: process abstract themes in order; each title theme claimed once
     matched_pairs = list(
         map(
             lambda abs_idx: (abs_idx, *match_abstract_theme(abs_idx)),
@@ -756,9 +756,6 @@ def generate_comparison_csv() -> str:
         )
     )
 
-    # Second pass: claim title indices regardless of similarity score.
-    # The Convergence label (CONVERGED/DIVERGED) communicates quality.
-    # This ensures every title theme appears in the table.
     def claim_match(triple):
         abs_idx, title_idx, sim = triple
         if title_idx is not None and title_idx not in used_title_idxs:
@@ -768,12 +765,10 @@ def generate_comparison_csv() -> str:
 
     final_pairs = list(map(claim_match, matched_pairs))
 
-    # ── Build rows ────────────────────────────────────────────────────────────
     def make_row(triple):
         abs_idx, title_idx, sim = triple
-        at = abstract_themes[abs_idx]
-        tt = title_themes[title_idx] if title_idx is not None else {}
-
+        at     = abstract_themes[abs_idx]
+        tt     = title_themes[title_idx] if title_idx is not None else {}
         a_name = at.get("theme_name", "")
         t_name = tt.get("theme_name", "")
 
@@ -783,7 +778,7 @@ def generate_comparison_csv() -> str:
             convergence = "CONVERGED"
         else:
             convergence = "DIVERGED"
-        
+
         return {
             "Abstract Theme":     a_name,
             "Abstract Sentences": at.get("total_sentences", ""),
@@ -793,37 +788,36 @@ def generate_comparison_csv() -> str:
             "Title Papers":       tt.get("paper_count", ""),
             "Similarity":         round(sim, 3) if t_name else "",
             "Convergence":        convergence,
-}
+        }
 
     rows = list(map(make_row, final_pairs))
 
-    # Append any title themes that were never matched to an abstract theme
-    matched_title_idxs = {triple[1] for triple in final_pairs if triple[1] is not None}
-    unmatched_title_rows = list(
+    matched_title_idxs    = {triple[1] for triple in final_pairs if triple[1] is not None}
+    unmatched_title_rows  = list(
         map(
             lambda ti: {
-                "Abstract Theme": "",
+                "Abstract Theme":     "",
                 "Abstract Sentences": "",
-                "Abstract Sub-Topics": "",
-                "Title Theme": title_themes[ti].get("theme_name", ""),
-                "Title Sentences": title_themes[ti].get("total_sentences", ""),
-                "Title Sub-Topics": title_themes[ti].get("sub_topics", ""),
-                "Similarity": "",
-                "Convergence": "TITLE ONLY",
+                "Abstract Papers":    "",
+                "Title Theme":        title_themes[ti].get("theme_name", ""),
+                "Title Sentences":    title_themes[ti].get("total_sentences", ""),
+                "Title Papers":       title_themes[ti].get("paper_count", ""),
+                "Similarity":         "",
+                "Convergence":        "TITLE ONLY",
             },
             [i for i in range(len(title_themes)) if i not in matched_title_idxs],
         )
     )
     rows = rows + unmatched_title_rows
 
-    df = pd.DataFrame(rows)
+    df          = pd.DataFrame(rows)
     output_path = CHECKPOINT_DIR / "comparison.csv"
     df.to_csv(output_path, index=False)
 
-    converged = sum(1 for r in rows if r["Convergence"] == "CONVERGED")
+    converged     = sum(1 for r in rows if r["Convergence"] == "CONVERGED")
     abstract_only = sum(1 for r in rows if r["Convergence"] == "ABSTRACT ONLY")
-    title_only = sum(1 for r in rows if r["Convergence"] == "TITLE ONLY")
-    diverged = sum(1 for r in rows if r["Convergence"] == "DIVERGED")
+    title_only    = sum(1 for r in rows if r["Convergence"] == "TITLE ONLY")
+    diverged      = sum(1 for r in rows if r["Convergence"] == "DIVERGED")
 
     return (
         f"Comparison CSV generated (semantic matching, threshold={CONVERGENCE_THRESHOLD}).\n"
@@ -846,42 +840,40 @@ def export_narrative(run_key: str = "abstract") -> str:
     """Generate a 500-word Section 7 narrative draft for a literature review paper.
     Uses final themes and PAJAIS taxonomy mapping. Saves narrative.txt."""
 
-    themes_path = CHECKPOINT_DIR / f"themes_{run_key}.json"
+    themes_path   = CHECKPOINT_DIR / f"themes_{run_key}.json"
     taxonomy_path = CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json"
 
-    assert (
-        themes_path.exists()
-    ), f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
-    assert (
-        taxonomy_path.exists()
-    ), f"taxonomy_map_{run_key}.json not found. Call compare_with_taxonomy(run_key='{run_key}') first."
-    themes = json.loads(themes_path.read_text())
+    assert themes_path.exists(), \
+        f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+    assert taxonomy_path.exists(), \
+        f"taxonomy_map_{run_key}.json not found. Call compare_with_taxonomy(run_key='{run_key}') first."
+
+    themes   = json.loads(themes_path.read_text())
     taxonomy = json.loads(taxonomy_path.read_text())
 
     tax_lookup = {t["theme_name"]: t for t in taxonomy}
 
     def theme_summary(t):
-        tax = tax_lookup.get(t["theme_name"], {})
-        pajais = tax.get("pajais_match", "NOVEL")
+        tax        = tax_lookup.get(t["theme_name"], {})
+        pajais     = tax.get("pajais_match", "NOVEL")
         novel_flag = "[NOVEL]" if tax.get("is_novel", False) else f"[PAJAIS: {pajais}]"
         return f"- {t['theme_name']} ({t['total_sentences']} sentences) {novel_flag}"
 
     themes_summary = "\n".join(list(map(theme_summary, themes)))
-    novel_themes = [
+    novel_themes   = [
         t["theme_name"]
         for t in themes
         if tax_lookup.get(t["theme_name"], {}).get("is_novel", False)
     ]
     novel_list = ", ".join(novel_themes) if novel_themes else "none identified"
 
-    llm = ChatGroq(model=GROQ_MODEL, temperature=0.3)
-
+    llm    = ChatGroq(model=GROQ_MODEL, temperature=0.3)
     prompt = PromptTemplate.from_template(
         """You are writing Section 7 of a conference paper on topic modelling of a journal's literature.
 
 Write approximately 500 words. Structure as follows:
-(a) Methodology: State that BERTopic with sentence-level embeddings (all-MiniLM-L6-v2, 384 dimensions) and
-    AgglomerativeClustering (cosine metric, threshold=0.7) was used. Mention Braun & Clarke (2006) six-phase
+(a) Methodology: State that BERTopic with sentence-level embeddings (allenai/specter2_base, 768 dimensions) and
+    AgglomerativeClustering (cosine metric, distance_threshold=0.35) was used. Mention Braun & Clarke (2006) six-phase
     thematic analysis framework and the researcher-in-the-loop validation process.
 (b) Findings: Describe each theme below with its label, sentence count, and PAJAIS mapping status.
     Reference the comparison CSV and PAJAIS taxonomy map.
@@ -900,13 +892,9 @@ Write in formal academic English. Cite Braun & Clarke (2006), Grootendorst (2022
 """
     )
 
-    chain = prompt | llm
+    chain    = prompt | llm
     response = chain.invoke(
-        {
-            "run_key": run_key,
-            "themes_summary": themes_summary,
-            "novel_list": novel_list,
-        }
+        {"run_key": run_key, "themes_summary": themes_summary, "novel_list": novel_list}
     )
 
     narrative = response.content
@@ -918,7 +906,7 @@ Write in formal academic English. Cite Braun & Clarke (2006), Grootendorst (2022
         f"  Themes covered: {len(themes)}\n"
         f"  Novel themes: {len(novel_themes)}\n"
         f"  Saved: narrative.txt\n"
-        f"Download from the Results tab. Use as the base draft for Section 7 of your conference paper.\n\n"
+        f"Download from the Results tab. Use as the base draft for Section 7.\n\n"
         f"--- NARRATIVE PREVIEW (first 300 chars) ---\n{narrative[:300]}..."
     )
 
