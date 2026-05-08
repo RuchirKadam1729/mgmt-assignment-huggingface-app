@@ -49,7 +49,7 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 #   0.35 → similarity ≥ 0.65  →  ~80–120 fine-grained topics  (recommended)
 #   0.30 → similarity ≥ 0.70  →  ~150–200 micro-topics
 #   0.45 → similarity ≥ 0.55  →  ~40–60 coarser themes
-AGGLO_DISTANCE_THRESHOLD = 0.35
+AGGLO_DISTANCE_THRESHOLD = 1.5
 AGGLO_MIN_CLUSTER_SIZE   = 20     # discard clusters with fewer sentences (treated as noise)
 AGGLO_MAX_CLUSTERS       = 120    # cap review table rows
 
@@ -225,17 +225,27 @@ def run_bertopic_discovery(run_key: str, threshold: float = AGGLO_DISTANCE_THRES
         sentences, normalize_embeddings=True, show_progress_bar=False
     )
 
+    # ── NEW: UMAP reduction 768d → 10d ────────────────────────────────────────
+    # Without this, every academic sentence sits within cosine dist ≤0.35 of its
+    # neighbours in 768d → all merge into 1 cluster. UMAP stretches semantic gaps
+    # into Euclidean distances so clustering can separate topics.
+    from umap import UMAP
+    reducer = UMAP(n_components=10, n_neighbors=15, min_dist=0.0,
+                   metric="cosine", random_state=42)
+    reduced_embeddings = reducer.fit_transform(embeddings)
+    # ─────────────────────────────────────────────────────────────────────────
+
     # ── AgglomerativeClustering (cosine distance, hard threshold) ─────────────
     # distance_threshold: cosine distance = 1 − cosine_similarity
     #   0.35 → groups sentences with similarity ≥ 0.65 → ~80-120 distinct topics
     # linkage="average": averages distances between all pairs (Ward requires euclidean)
     clustering = AgglomerativeClustering(
         n_clusters=None,
-        metric="cosine",
-        linkage="average",
+        metric="euclidean",   # UMAP output is Euclidean, not cosine
+        linkage="ward",       # Ward is optimal for Euclidean space
         distance_threshold=threshold,
     )
-    raw_labels = clustering.fit_predict(embeddings)
+    raw_labels = clustering.fit_predict(reduced_embeddings)   # ← reduced, not embeddings
 
     # ── Post-filter: discard clusters smaller than MIN_CLUSTER_SIZE ───────────
     # (analogous to DBSCAN's min_samples — tiny clusters are treated as noise)
