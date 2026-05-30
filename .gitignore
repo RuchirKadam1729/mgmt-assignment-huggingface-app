@@ -1,9 +1,6 @@
 secrets/*
-**/*.csv
-**/*.json
 .DS_Store
 checkpoints.zip
-test_pipeline.py
 
 # Runtime checkpoints — generated at runtime, never committed
 checkpoints/
