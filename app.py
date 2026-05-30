@@ -26,7 +26,7 @@ try:
         return _orig_parse(schema, defs)
 
     _gcu._json_schema_to_python_type = _safe_parse
-except (ImportError, AttributeError):
+except ImportError, AttributeError:
     pass
 
 # Patch 2: fix localhost check failing inside Docker (no-op on HF Spaces)
@@ -34,12 +34,10 @@ try:
     import gradio.networking as _gnet
 
     _gnet.is_localhost_accessible = lambda: True
-except (ImportError, AttributeError):
+except ImportError, AttributeError:
     pass
 # ── END PATCHES ────────────────────────────────────────────────────────────
-import os
 import json
-import shutil
 import gradio as gr
 from pathlib import Path
 from agent import create_agent, invoke_agent
@@ -252,8 +250,10 @@ def parse_review_table_to_theme_map(table_data) -> str:
 
     approved = list(
         filter(
-            lambda row: len(row) > 5
-            and str(row[5]).strip().lower() in ("yes", "y", "1", "true"),
+            lambda row: (
+                len(row) > 5
+                and str(row[5]).strip().lower() in ("yes", "y", "1", "true")
+            ),
             rows,
         )
     )
@@ -334,11 +334,12 @@ def on_auto_flag_boilerplate(table_data):
 
     return list(map(flag, rows))
 
+
 def load_phase_snapshot(run_key: str, phase_label: str) -> list:
     phase_map = {
         "Phase 2 — Initial codes (labels)": f"labels_{run_key}.json",
-        "Phase 3 — Themes":                 f"themes_{run_key}.json",
-        "Phase 5.5 — PAJAIS mapping":       f"taxonomy_map_{run_key}.json",
+        "Phase 3 — Themes": f"themes_{run_key}.json",
+        "Phase 5.5 — PAJAIS mapping": f"taxonomy_map_{run_key}.json",
     }
     filename = phase_map.get(phase_label)
     if not filename:
@@ -348,35 +349,51 @@ def load_phase_snapshot(run_key: str, phase_label: str) -> list:
         return []
     data = json.loads(path.read_text())
     if "labels" in filename:
-        return [[i+1,
-                 t.get("label", ""),
-                 t.get("top_sentences", [""])[0] if t.get("top_sentences") else "",
-                 t.get("size", ""),
-                 t.get("paper_count", ""),
-                 t.get("confidence", ""),
-                 "",
-                 t.get("reasoning", "")]
-                for i, t in enumerate(data[:100])]
+        return [
+            [
+                i + 1,
+                t.get("label", ""),
+                t.get("top_sentences", [""])[0] if t.get("top_sentences") else "",
+                t.get("size", ""),
+                t.get("paper_count", ""),
+                t.get("confidence", ""),
+                "",
+                t.get("reasoning", ""),
+            ]
+            for i, t in enumerate(data[:100])
+        ]
     if "themes" in filename:
-        return [[i+1,
-                 t.get("theme_name", ""),
-                 "; ".join(t.get("representative_sentences", [])[:1]),
-                 t.get("total_sentences", ""),
-                 t.get("paper_count", t.get("sub_topics", "")),
-                 "yes", "", ""]
-                for i, t in enumerate(data)]
+        return [
+            [
+                i + 1,
+                t.get("theme_name", ""),
+                "; ".join(t.get("representative_sentences", [])[:1]),
+                t.get("total_sentences", ""),
+                t.get("paper_count", t.get("sub_topics", "")),
+                "yes",
+                "",
+                "",
+            ]
+            for i, t in enumerate(data)
+        ]
     if "taxonomy" in filename:
-        return [[i+1,
-                 t.get("theme_name", ""),
-                 f"→ {t.get('pajais_match', 'NOVEL')} | {t.get('reasoning', '')}",
-                 t.get("total_sentences", ""),
-                 t.get("paper_count", ""),
-                 "yes", "", t.get("reasoning", "")]
-                for i, t in enumerate(data)]
+        return [
+            [
+                i + 1,
+                t.get("theme_name", ""),
+                f"→ {t.get('pajais_match', 'NOVEL')} | {t.get('reasoning', '')}",
+                t.get("total_sentences", ""),
+                t.get("paper_count", ""),
+                "yes",
+                "",
+                t.get("reasoning", ""),
+            ]
+            for i, t in enumerate(data)
+        ]
     return []
 
-with gr.Blocks(title="BERTopic Agentic AI") as app:
 
+with gr.Blocks(title="BERTopic Agentic AI") as app:
     # State
     run_key_state = gr.State("abstract")
     uploaded_path_state = gr.State(None)
@@ -421,7 +438,6 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
     with gr.Group():
         gr.Markdown("**③ Results**", elem_classes=["section-label"])
         with gr.Tabs():
-
             with gr.Tab("Review table"):
                 gr.Markdown(
                     "_Edit **Approve** (yes/no), **Rename To** (merge topics with same name), and **Reasoning**. Then click Submit Review._",

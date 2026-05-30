@@ -25,9 +25,7 @@ import re
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 from pathlib import Path
-import os
 from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -46,9 +44,9 @@ nltk.download("punkt_tab", quiet=True)
 CHECKPOINT_DIR = Path("checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
-EMBED_MODEL = "allenai/specter2_base"   # 768-d scientific paper embeddings
-NEAREST_K = 3                           # top 3 sentences per cluster centroid
-MAX_LABEL_TOPICS = 120                  # label up to 120 clusters
+EMBED_MODEL = "allenai/specter2_base"  # 768-d scientific paper embeddings
+NEAREST_K = 3  # top 3 sentences per cluster centroid
+MAX_LABEL_TOPICS = 120  # label up to 120 clusters
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # ── AgglomerativeClustering parameters ────────────────────────────────────────
@@ -58,8 +56,8 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 #   1.2 → ~150–200 micro-topics
 #   2.0 → ~40–60 coarser themes
 AGGLO_DISTANCE_THRESHOLD = 1.5
-AGGLO_MIN_CLUSTER_SIZE   = 20     # discard clusters smaller than this (noise)
-AGGLO_MAX_CLUSTERS       = 120    # cap review table rows
+AGGLO_MIN_CLUSTER_SIZE = 20  # discard clusters smaller than this (noise)
+AGGLO_MAX_CLUSTERS = 120  # cap review table rows
 
 # ── FIX: batch size for per-model labeling calls ─────────────────────────────
 # Root cause of "cannot generate topic labels":
@@ -71,14 +69,14 @@ LABEL_BATCH_SIZE = 15
 # FIX: replaced meta-llama/llama-4-scout-17b-16e-instruct with gemma2-9b-it
 #   (scout model had TPM=6k same as 70b, and model-name format caused occasional errors)
 COUNCIL_MODELS = [
-    "llama-3.3-70b-versatile",   # primary — high quality
-    "llama-3.1-8b-instant",      # fast lightweight voice
-    "gemma2-9b-it",              # FIX: was meta-llama/llama-4-scout-17b-16e-instruct
+    "llama-3.3-70b-versatile",  # primary — high quality
+    "llama-3.1-8b-instant",  # fast lightweight voice
+    "gemma2-9b-it",  # FIX: was meta-llama/llama-4-scout-17b-16e-instruct
 ]
 
 RUN_CONFIGS = {
     "abstract": ["Abstract"],
-    "title":    ["Title"],
+    "title": ["Title"],
     "combined": ["Abstract", "Title"],
 }
 
@@ -197,7 +195,9 @@ def load_scopus_csv(filepath: str) -> str:
 # ─── Tool 2: BERTopic Discovery (helper, not @tool) ──────────────────────────
 
 
-def run_bertopic_discovery(run_key: str, threshold: float = AGGLO_DISTANCE_THRESHOLD) -> str:
+def run_bertopic_discovery(
+    run_key: str, threshold: float = AGGLO_DISTANCE_THRESHOLD
+) -> str:
     """Embed sentences using allenai/specter2_base (768d), reduce with UMAP to 10d,
     cluster with AgglomerativeClustering (Ward/Euclidean, hard threshold — no chaining).
     Saves summaries.json, emb.npy, and three Plotly chart HTML files."""
@@ -224,7 +224,7 @@ def run_bertopic_discovery(run_key: str, threshold: float = AGGLO_DISTANCE_THRES
         for s in sents
         if len(s.strip()) > 30
     ]
-    sentences      = [p[0] for p in sentence_paper_pairs]
+    sentences = [p[0] for p in sentence_paper_pairs]
     sent_paper_ids = [p[1] for p in sentence_paper_pairs]
 
     model = SentenceTransformer(EMBED_MODEL)
@@ -238,50 +238,55 @@ def run_bertopic_discovery(run_key: str, threshold: float = AGGLO_DISTANCE_THRES
     # merges everything into 1 cluster. UMAP spreads semantic gaps into Euclidean
     # distances that Ward linkage can cut cleanly.
     from umap import UMAP
-    reducer = UMAP(n_components=10, n_neighbors=15, min_dist=0.0,
-                   metric="cosine", random_state=42)
+
+    reducer = UMAP(
+        n_components=10, n_neighbors=15, min_dist=0.0, metric="cosine", random_state=42
+    )
     reduced_embeddings = reducer.fit_transform(embeddings)
 
     # ── AgglomerativeClustering (Ward, Euclidean in UMAP space) ───────────────
     clustering = AgglomerativeClustering(
         n_clusters=None,
-        metric="euclidean",       # UMAP output is in Euclidean space
-        linkage="ward",           # Ward minimises within-cluster variance
+        metric="euclidean",  # UMAP output is in Euclidean space
+        linkage="ward",  # Ward minimises within-cluster variance
         distance_threshold=threshold,
     )
     raw_labels = clustering.fit_predict(reduced_embeddings)
 
     # Post-filter: discard clusters smaller than AGGLO_MIN_CLUSTER_SIZE (noise)
     from collections import Counter
+
     cluster_sizes = Counter(raw_labels.tolist())
-    valid_ids = {cid for cid, sz in cluster_sizes.items() if sz >= AGGLO_MIN_CLUSTER_SIZE}
+    valid_ids = {
+        cid for cid, sz in cluster_sizes.items() if sz >= AGGLO_MIN_CLUSTER_SIZE
+    }
     labels = np.array([cid if cid in valid_ids else -1 for cid in raw_labels])
 
-    noise_count       = int((labels == -1).sum())
+    noise_count = int((labels == -1).sum())
     valid_cluster_ids = sorted(valid_ids)
-    n_clusters        = len(valid_cluster_ids)
+    n_clusters = len(valid_cluster_ids)
 
     def get_cluster_data(cluster_id):
-        mask               = labels == cluster_id
+        mask = labels == cluster_id
         cluster_embeddings = embeddings[mask]
-        cluster_sentences  = [s   for s,   m in zip(sentences,      mask) if m]
-        cluster_paper_ids  = [pid for pid, m in zip(sent_paper_ids, mask) if m]
-        centroid           = cluster_embeddings.mean(axis=0, keepdims=True)
-        sims               = cosine_similarity(centroid, cluster_embeddings)[0]
-        top_idx            = sims.argsort()[-NEAREST_K:][::-1]
-        top_sentences      = [cluster_sentences[i] for i in top_idx]
-        unique_paper_ids   = list(set(cluster_paper_ids))
+        cluster_sentences = [s for s, m in zip(sentences, mask) if m]
+        cluster_paper_ids = [pid for pid, m in zip(sent_paper_ids, mask) if m]
+        centroid = cluster_embeddings.mean(axis=0, keepdims=True)
+        sims = cosine_similarity(centroid, cluster_embeddings)[0]
+        top_idx = sims.argsort()[-NEAREST_K:][::-1]
+        top_sentences = [cluster_sentences[i] for i in top_idx]
+        unique_paper_ids = list(set(cluster_paper_ids))
         return {
-            "cluster_id":    cluster_id,
-            "size":          int(mask.sum()),
-            "paper_count":   len(unique_paper_ids),
+            "cluster_id": cluster_id,
+            "size": int(mask.sum()),
+            "paper_count": len(unique_paper_ids),
             "paper_indices": unique_paper_ids,
-            "centroid":      centroid[0].tolist(),
+            "centroid": centroid[0].tolist(),
             "top_sentences": top_sentences,
-            "label":         f"Topic {cluster_id}",
+            "label": f"Topic {cluster_id}",
         }
 
-    summaries        = list(map(get_cluster_data, valid_cluster_ids))
+    summaries = list(map(get_cluster_data, valid_cluster_ids))
     summaries_sorted = sorted(summaries, key=lambda x: x["size"], reverse=True)
     summaries_sorted = summaries_sorted[:AGGLO_MAX_CLUSTERS]
 
@@ -290,45 +295,69 @@ def run_bertopic_discovery(run_key: str, threshold: float = AGGLO_DISTANCE_THRES
     )
     np.save(CHECKPOINT_DIR / f"emb_{run_key}.npy", embeddings)
     (CHECKPOINT_DIR / f"sentences_{run_key}.json").write_text(json.dumps(sentences))
-    (CHECKPOINT_DIR / f"paper_ids_{run_key}.json").write_text(json.dumps(sent_paper_ids))
+    (CHECKPOINT_DIR / f"paper_ids_{run_key}.json").write_text(
+        json.dumps(sent_paper_ids)
+    )
 
-    sizes       = [s["size"] for s in summaries_sorted[:30]]
+    sizes = [s["size"] for s in summaries_sorted[:30]]
     topic_names = [f"T{s['cluster_id']}" for s in summaries_sorted[:30]]
 
     fig_bar = go.Figure(go.Bar(x=topic_names, y=sizes, marker_color="#378ADD"))
     fig_bar.update_layout(
         title="Top 30 topics by sentence count",
-        xaxis_title="Topic", yaxis_title="Sentences", height=350,
+        xaxis_title="Topic",
+        yaxis_title="Sentences",
+        height=350,
     )
 
-    centroids  = np.array([s["centroid"] for s in summaries_sorted[:50]])
+    centroids = np.array([s["centroid"] for s in summaries_sorted[:50]])
     sim_matrix = cosine_similarity(centroids)
-    fig_heat   = go.Figure(go.Heatmap(z=sim_matrix, colorscale="Blues"))
+    fig_heat = go.Figure(go.Heatmap(z=sim_matrix, colorscale="Blues"))
     fig_heat.update_layout(title="Topic similarity heatmap (top 50)", height=400)
 
-    x_coords = list(map(
-        lambda i: float(np.cos(2 * np.pi * i / len(summaries_sorted[:30]))),
-        range(len(summaries_sorted[:30])),
-    ))
-    y_coords = list(map(
-        lambda i: float(np.sin(2 * np.pi * i / len(summaries_sorted[:30]))),
-        range(len(summaries_sorted[:30])),
-    ))
-    fig_map = go.Figure(go.Scatter(
-        x=x_coords, y=y_coords, mode="markers+text",
-        marker=dict(
-            size=list(map(lambda s: max(8, min(40, s["size"] // 5)), summaries_sorted[:30])),
-            color="#1D9E75", opacity=0.7,
-        ),
-        text=topic_names, textposition="top center",
-    ))
+    x_coords = list(
+        map(
+            lambda i: float(np.cos(2 * np.pi * i / len(summaries_sorted[:30]))),
+            range(len(summaries_sorted[:30])),
+        )
+    )
+    y_coords = list(
+        map(
+            lambda i: float(np.sin(2 * np.pi * i / len(summaries_sorted[:30]))),
+            range(len(summaries_sorted[:30])),
+        )
+    )
+    fig_map = go.Figure(
+        go.Scatter(
+            x=x_coords,
+            y=y_coords,
+            mode="markers+text",
+            marker=dict(
+                size=list(
+                    map(
+                        lambda s: max(8, min(40, s["size"] // 5)), summaries_sorted[:30]
+                    )
+                ),
+                color="#1D9E75",
+                opacity=0.7,
+            ),
+            text=topic_names,
+            textposition="top center",
+        )
+    )
     fig_map.update_layout(
         title="Intertopic distance map (top 30)", height=400, showlegend=False
     )
 
-    fig_bar.write_html(str(CHECKPOINT_DIR / f"chart_bar_{run_key}.html"),  include_plotlyjs="cdn")
-    fig_heat.write_html(str(CHECKPOINT_DIR / f"chart_heat_{run_key}.html"), include_plotlyjs="cdn")
-    fig_map.write_html(str(CHECKPOINT_DIR / f"chart_map_{run_key}.html"),  include_plotlyjs="cdn")
+    fig_bar.write_html(
+        str(CHECKPOINT_DIR / f"chart_bar_{run_key}.html"), include_plotlyjs="cdn"
+    )
+    fig_heat.write_html(
+        str(CHECKPOINT_DIR / f"chart_heat_{run_key}.html"), include_plotlyjs="cdn"
+    )
+    fig_map.write_html(
+        str(CHECKPOINT_DIR / f"chart_map_{run_key}.html"), include_plotlyjs="cdn"
+    )
 
     return (
         f"BERTopic discovery complete for run_key='{run_key}'.\n"
@@ -364,11 +393,11 @@ def label_topics_with_llm(run_key: str) -> str:
     import time
     from itertools import chain as ichain
 
-    assert (
-        CHECKPOINT_DIR / f"summaries_{run_key}.json"
-    ).exists(), f"summaries_{run_key}.json not found. Run discovery first."
+    assert (CHECKPOINT_DIR / f"summaries_{run_key}.json").exists(), (
+        f"summaries_{run_key}.json not found. Run discovery first."
+    )
 
-    summaries  = json.loads((CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text())
+    summaries = json.loads((CHECKPOINT_DIR / f"summaries_{run_key}.json").read_text())
     top_topics = summaries[:MAX_LABEL_TOPICS]
 
     def build_topic_text(t):
@@ -398,10 +427,10 @@ Topics:
     # ── FIX: batch per-model calls at LABEL_BATCH_SIZE topics each ────────────
     def get_labels_from_model(idx_model):
         idx, model_name = idx_model
-        time.sleep(idx * 6)      # stagger starts: model 0 → 0s, 1 → 6s, 2 → 12s
+        time.sleep(idx * 6)  # stagger starts: model 0 → 0s, 1 → 6s, 2 → 12s
 
         # max_tokens=4096: prevents truncated JSON when the model hits its output limit
-        llm   = ChatGroq(model=model_name, temperature=0.1, max_tokens=4096)
+        llm = ChatGroq(model=model_name, temperature=0.1, max_tokens=4096)
         chain = labeling_prompt | llm | parser
 
         label_batches = [
@@ -413,10 +442,10 @@ Topics:
             batch_text = "\n\n".join(list(map(build_topic_text, batch)))
             try:
                 res = chain.invoke({"topics_text": batch_text})
-                time.sleep(4)    # pause between batches to respect Groq TPM limits
+                time.sleep(4)  # pause between batches to respect Groq TPM limits
                 return res if isinstance(res, list) else []
             except Exception:
-                time.sleep(8)    # back off on 429 / connection error
+                time.sleep(8)  # back off on 429 / connection error
                 return []
 
         # Flatten all batch results into one list for this model
@@ -426,19 +455,33 @@ Topics:
     # ── END FIX ───────────────────────────────────────────────────────────────
 
     def get_one_proposal(result_list, cid_str):
-        matches = list(filter(
-            lambda item: isinstance(item, dict) and str(item.get("cluster_id")) == cid_str,
-            result_list,
-        ))
-        return matches[0] if matches else {"label": "Unlabeled", "reasoning": "", "confidence": 0.5}
+        matches = list(
+            filter(
+                lambda item: (
+                    isinstance(item, dict) and str(item.get("cluster_id")) == cid_str
+                ),
+                result_list,
+            )
+        )
+        return (
+            matches[0]
+            if matches
+            else {"label": "Unlabeled", "reasoning": "", "confidence": 0.5}
+        )
 
     def collect_proposals(topic):
-        cid_str   = str(topic["cluster_id"])
-        proposals = list(map(
-            lambda res: get_one_proposal(res, cid_str),
-            all_model_results,
-        ))
-        return {"cluster_id": topic["cluster_id"], "size": topic["size"], "proposals": proposals}
+        cid_str = str(topic["cluster_id"])
+        proposals = list(
+            map(
+                lambda res: get_one_proposal(res, cid_str),
+                all_model_results,
+            )
+        )
+        return {
+            "cluster_id": topic["cluster_id"],
+            "size": topic["size"],
+            "proposals": proposals,
+        }
 
     per_topic_proposals = list(map(collect_proposals, top_topics))
 
@@ -456,16 +499,20 @@ No preamble, no markdown, no backticks.
 """
     )
 
-    council_llm   = ChatGroq(model=GROQ_MODEL, temperature=0.0, max_tokens=4096)
+    council_llm = ChatGroq(model=GROQ_MODEL, temperature=0.0, max_tokens=4096)
     council_chain = council_prompt | council_llm | parser
 
     COUNCIL_BATCH = 20
 
     def format_proposal_block(p):
-        rows = list(map(
-            lambda idx_prop: f"  Model {idx_prop[0]+1}: {idx_prop[1].get('label','?')} | {idx_prop[1].get('reasoning','')}",
-            enumerate(p["proposals"]),
-        ))
+        rows = list(
+            map(
+                lambda idx_prop: (
+                    f"  Model {idx_prop[0] + 1}: {idx_prop[1].get('label', '?')} | {idx_prop[1].get('reasoning', '')}"
+                ),
+                enumerate(p["proposals"]),
+            )
+        )
         return f"TOPIC {p['cluster_id']} (size={p['size']}):\n" + "\n".join(rows)
 
     def process_council_batch(batch):
@@ -477,43 +524,59 @@ No preamble, no markdown, no backticks.
         time.sleep(2)
         return result if isinstance(result, list) else []
 
-    batches         = [per_topic_proposals[i : i + COUNCIL_BATCH]
-                       for i in range(0, len(per_topic_proposals), COUNCIL_BATCH)]
+    batches = [
+        per_topic_proposals[i : i + COUNCIL_BATCH]
+        for i in range(0, len(per_topic_proposals), COUNCIL_BATCH)
+    ]
     council_batches = list(map(process_council_batch, batches))
 
-    council_results = list(filter(
-        lambda item: isinstance(item, dict) and "cluster_id" in item,
-        ichain.from_iterable(council_batches),
-    ))
+    council_results = list(
+        filter(
+            lambda item: isinstance(item, dict) and "cluster_id" in item,
+            ichain.from_iterable(council_batches),
+        )
+    )
     council_lookup = {str(item["cluster_id"]): item for item in council_results}
 
     def merge_with_council(s):
-        cid_str  = str(s["cluster_id"])
-        council  = council_lookup.get(cid_str, {
-            "label":         f"Topic {s['cluster_id']}",
-            "confidence":    0.5,
-            "reasoning":     "Council: no decision",
-            "winning_model": 0,
-        })
-        matched_proposals = list(filter(
-            lambda p: p["cluster_id"] == s["cluster_id"], per_topic_proposals
-        ))
-        proposal_labels = list(map(
-            lambda prop: prop.get("label", ""),
-            matched_proposals[0]["proposals"] if matched_proposals else [],
-        ))
+        cid_str = str(s["cluster_id"])
+        council = council_lookup.get(
+            cid_str,
+            {
+                "label": f"Topic {s['cluster_id']}",
+                "confidence": 0.5,
+                "reasoning": "Council: no decision",
+                "winning_model": 0,
+            },
+        )
+        matched_proposals = list(
+            filter(lambda p: p["cluster_id"] == s["cluster_id"], per_topic_proposals)
+        )
+        proposal_labels = list(
+            map(
+                lambda prop: prop.get("label", ""),
+                matched_proposals[0]["proposals"] if matched_proposals else [],
+            )
+        )
         return {**s, **council, "council_proposals": proposal_labels}
 
     enriched = list(map(merge_with_council, summaries))
-    (CHECKPOINT_DIR / f"labels_{run_key}.json").write_text(json.dumps(enriched, indent=2))
+    (CHECKPOINT_DIR / f"labels_{run_key}.json").write_text(
+        json.dumps(enriched, indent=2)
+    )
 
-    sample_text = "\n".join([
-        f"  T{t['cluster_id']}: {t.get('label','?')}  "
-        f"[won=Model {t.get('winning_model',0)}]  conf={t.get('confidence',0):.2f}"
-        for t in enriched[:5]
-    ])
-    winning     = [r.get("winning_model", 0) for r in council_results]
-    model_wins  = {m: winning.count(i+1) for i, m in enumerate(["Llama-70b", "Llama-8b", "Gemma"])}
+    sample_text = "\n".join(
+        [
+            f"  T{t['cluster_id']}: {t.get('label', '?')}  "
+            f"[won=Model {t.get('winning_model', 0)}]  conf={t.get('confidence', 0):.2f}"
+            for t in enriched[:5]
+        ]
+    )
+    winning = [r.get("winning_model", 0) for r in council_results]
+    model_wins = {
+        m: winning.count(i + 1)
+        for i, m in enumerate(["Llama-70b", "Llama-8b", "Gemma"])
+    }
     synth_count = winning.count(0)
 
     return (
@@ -529,13 +592,15 @@ No preamble, no markdown, no backticks.
 
 
 @tool
-def run_bertopic_and_label(run_key: str, threshold: float = AGGLO_DISTANCE_THRESHOLD) -> str:
+def run_bertopic_and_label(
+    run_key: str, threshold: float = AGGLO_DISTANCE_THRESHOLD
+) -> str:
     """Run AgglomerativeClustering-based BERTopic discovery AND council-of-3-LLMs labelling
     in one step. run_key must be 'abstract', 'title', or 'combined'.
     threshold is the Euclidean distance_threshold in 10d UMAP space (default 1.5).
     Lower values → more, finer clusters. Higher values → fewer, coarser clusters."""
     discovery_result = run_bertopic_discovery(run_key, threshold)
-    label_result     = label_topics_with_llm(run_key)
+    label_result = label_topics_with_llm(run_key)
     return discovery_result + "\n\n" + label_result
 
 
@@ -548,45 +613,54 @@ def consolidate_into_themes(run_key: str, theme_map: dict) -> str:
     theme_map is a dict: {"Theme Name": [cluster_id1, cluster_id2, ...], ...}
     Recomputes sentence/paper counts. Saves themes.json."""
 
-    assert (CHECKPOINT_DIR / f"labels_{run_key}.json").exists(), \
+    assert (CHECKPOINT_DIR / f"labels_{run_key}.json").exists(), (
         f"labels_{run_key}.json not found. Call run_bertopic_and_label(run_key='{run_key}') first."
-    assert (CHECKPOINT_DIR / f"emb_{run_key}.npy").exists(), \
+    )
+    assert (CHECKPOINT_DIR / f"emb_{run_key}.npy").exists(), (
         f"emb_{run_key}.npy not found. Call run_bertopic_and_label(run_key='{run_key}') first."
-    assert (CHECKPOINT_DIR / f"sentences_{run_key}.json").exists(), \
+    )
+    assert (CHECKPOINT_DIR / f"sentences_{run_key}.json").exists(), (
         f"sentences_{run_key}.json not found. Call run_bertopic_and_label(run_key='{run_key}') first."
+    )
 
     labels_data = json.loads((CHECKPOINT_DIR / f"labels_{run_key}.json").read_text())
     cluster_lookup = {str(t["cluster_id"]): t for t in labels_data}
 
     def build_theme(theme_name_ids):
         theme_name, cluster_ids = theme_name_ids
-        ids_set           = set(map(str, cluster_ids))
-        member_topics     = [cluster_lookup[cid] for cid in ids_set if cid in cluster_lookup]
-        all_sentences     = [s for t in member_topics for s in t.get("top_sentences", [])]
-        total_size        = sum(t.get("size", 0) for t in member_topics)
-        topic_labels      = [t.get("label", f"T{t['cluster_id']}") for t in member_topics]
+        ids_set = set(map(str, cluster_ids))
+        member_topics = [
+            cluster_lookup[cid] for cid in ids_set if cid in cluster_lookup
+        ]
+        all_sentences = [s for t in member_topics for s in t.get("top_sentences", [])]
+        total_size = sum(t.get("size", 0) for t in member_topics)
+        topic_labels = [t.get("label", f"T{t['cluster_id']}") for t in member_topics]
         all_paper_indices = set(
             pid for t in member_topics for pid in t.get("paper_indices", [])
         )
         return {
-            "theme_name":               theme_name,
-            "cluster_ids":              cluster_ids,
-            "merged_topic_labels":      topic_labels,
-            "total_sentences":          total_size,
-            "paper_count":              len(all_paper_indices),
+            "theme_name": theme_name,
+            "cluster_ids": cluster_ids,
+            "merged_topic_labels": topic_labels,
+            "total_sentences": total_size,
+            "paper_count": len(all_paper_indices),
             "representative_sentences": all_sentences[:NEAREST_K],
-            "sub_topics":               len(member_topics),
+            "sub_topics": len(member_topics),
         }
 
-    themes        = list(map(build_theme, theme_map.items()))
+    themes = list(map(build_theme, theme_map.items()))
     themes_sorted = sorted(themes, key=lambda x: x["total_sentences"], reverse=True)
 
-    (CHECKPOINT_DIR / f"themes_{run_key}.json").write_text(json.dumps(themes_sorted, indent=2))
+    (CHECKPOINT_DIR / f"themes_{run_key}.json").write_text(
+        json.dumps(themes_sorted, indent=2)
+    )
 
-    theme_summary = "\n".join([
-        f"  {i+1}. {t['theme_name']} ({t['total_sentences']} sentences, {t['sub_topics']} sub-topics)"
-        for i, t in enumerate(themes_sorted)
-    ])
+    theme_summary = "\n".join(
+        [
+            f"  {i + 1}. {t['theme_name']} ({t['total_sentences']} sentences, {t['sub_topics']} sub-topics)"
+            for i, t in enumerate(themes_sorted)
+        ]
+    )
 
     return (
         f"Themes consolidated for run_key='{run_key}'.\n"
@@ -606,13 +680,16 @@ def compare_with_taxonomy(run_key: str) -> str:
     Each theme is classified as MAPPED (with category) or NOVEL (new contribution).
     Saves taxonomy_map.json."""
 
-    assert (CHECKPOINT_DIR / f"themes_{run_key}.json").exists(), \
+    assert (CHECKPOINT_DIR / f"themes_{run_key}.json").exists(), (
         f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+    )
 
     themes = json.loads((CHECKPOINT_DIR / f"themes_{run_key}.json").read_text())
-    llm    = ChatGroq(model=GROQ_MODEL, temperature=0.1)
+    llm = ChatGroq(model=GROQ_MODEL, temperature=0.1)
 
-    categories_text = "\n".join([f"  {i+1}. {c}" for i, c in enumerate(PAJAIS_CATEGORIES)])
+    categories_text = "\n".join(
+        [f"  {i + 1}. {c}" for i, c in enumerate(PAJAIS_CATEGORIES)]
+    )
 
     def build_theme_text(t):
         sentences = "; ".join(t.get("representative_sentences", [])[:2])
@@ -639,64 +716,91 @@ Themes to map:
     )
 
     parser = JsonOutputParser()
-    chain  = prompt | llm | parser
+    chain = prompt | llm | parser
 
     BATCH_SIZE = 20
 
     def make_batches(lst, size):
-        return [lst[i:i+size] for i in range(0, len(lst), size)]
+        return [lst[i : i + size] for i in range(0, len(lst), size)]
 
     def process_batch(batch):
         themes_text = "\n\n".join(list(map(build_theme_text, batch)))
         try:
-            return chain.invoke({"categories": categories_text, "themes_text": themes_text})
+            return chain.invoke(
+                {"categories": categories_text, "themes_text": themes_text}
+            )
         except Exception:
             half = len(batch) // 2
             if half == 0:
                 return []
-            r1 = chain.invoke({"categories": categories_text,
-                                "themes_text": "\n\n".join(list(map(build_theme_text, batch[:half])))})
-            r2 = chain.invoke({"categories": categories_text,
-                                "themes_text": "\n\n".join(list(map(build_theme_text, batch[half:])))})
-            return (r1 if isinstance(r1, list) else []) + (r2 if isinstance(r2, list) else [])
+            r1 = chain.invoke(
+                {
+                    "categories": categories_text,
+                    "themes_text": "\n\n".join(
+                        list(map(build_theme_text, batch[:half]))
+                    ),
+                }
+            )
+            r2 = chain.invoke(
+                {
+                    "categories": categories_text,
+                    "themes_text": "\n\n".join(
+                        list(map(build_theme_text, batch[half:]))
+                    ),
+                }
+            )
+            return (r1 if isinstance(r1, list) else []) + (
+                r2 if isinstance(r2, list) else []
+            )
 
     import time
+
     def process_with_delay(batch):
         result = process_batch(batch)
         time.sleep(2)
         return result
 
-    batches     = make_batches(themes, BATCH_SIZE)
+    batches = make_batches(themes, BATCH_SIZE)
     raw_results = list(map(process_with_delay, batches))
 
     result = [
-        item for batch_result in raw_results
+        item
+        for batch_result in raw_results
         if isinstance(batch_result, list)
         for item in batch_result
         if isinstance(item, dict) and "theme_name" in item
     ]
 
-    mapped   = {item["theme_name"]: item for item in result}
-    enriched = list(map(
-        lambda t: {
-            **t,
-            **mapped.get(t["theme_name"], {
-                "pajais_match":     "NOVEL",
-                "is_novel":         True,
-                "match_confidence": 0,
-                "reasoning":        "No mapping found",
-            }),
-        },
-        themes,
-    ))
+    mapped = {item["theme_name"]: item for item in result}
+    enriched = list(
+        map(
+            lambda t: {
+                **t,
+                **mapped.get(
+                    t["theme_name"],
+                    {
+                        "pajais_match": "NOVEL",
+                        "is_novel": True,
+                        "match_confidence": 0,
+                        "reasoning": "No mapping found",
+                    },
+                ),
+            },
+            themes,
+        )
+    )
 
-    novel_count  = sum(1 for t in enriched if t.get("is_novel", False))
+    novel_count = sum(1 for t in enriched if t.get("is_novel", False))
     mapped_count = len(enriched) - novel_count
 
-    (CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json").write_text(json.dumps(enriched, indent=2))
+    (CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json").write_text(
+        json.dumps(enriched, indent=2)
+    )
 
     novel_names = [t["theme_name"] for t in enriched if t.get("is_novel", False)]
-    novel_text  = "\n".join([f"  * {n}" for n in novel_names]) if novel_names else "  (none)"
+    novel_text = (
+        "\n".join([f"  * {n}" for n in novel_names]) if novel_names else "  (none)"
+    )
 
     return (
         f"PAJAIS taxonomy mapping complete for run_key='{run_key}'.\n"
@@ -720,25 +824,29 @@ def generate_comparison_csv() -> str:
     Saves comparison.csv."""
 
     abstract_path = CHECKPOINT_DIR / "themes_abstract.json"
-    title_path    = CHECKPOINT_DIR / "themes_title.json"
+    title_path = CHECKPOINT_DIR / "themes_title.json"
 
-    abstract_themes = json.loads(abstract_path.read_text()) if abstract_path.exists() else []
-    title_themes    = json.loads(title_path.read_text())    if title_path.exists()    else []
+    abstract_themes = (
+        json.loads(abstract_path.read_text()) if abstract_path.exists() else []
+    )
+    title_themes = json.loads(title_path.read_text()) if title_path.exists() else []
 
     CONVERGENCE_THRESHOLD = 0.40
 
     model = SentenceTransformer(EMBED_MODEL)
 
     abstract_names = list(map(lambda t: t.get("theme_name", ""), abstract_themes))
-    title_names    = list(map(lambda t: t.get("theme_name", ""), title_themes))
+    title_names = list(map(lambda t: t.get("theme_name", ""), title_themes))
 
     abstract_embs = (
         model.encode(abstract_names, normalize_embeddings=True)
-        if abstract_names else np.zeros((0, 768))
+        if abstract_names
+        else np.zeros((0, 768))
     )
     title_embs = (
         model.encode(title_names, normalize_embeddings=True)
-        if title_names else np.zeros((0, 768))
+        if title_names
+        else np.zeros((0, 768))
     )
 
     used_title_idxs = set()
@@ -746,17 +854,21 @@ def generate_comparison_csv() -> str:
     def match_abstract_theme(abs_idx):
         if len(title_embs) == 0:
             return None, 0.0
-        sims           = cosine_similarity(abstract_embs[abs_idx : abs_idx + 1], title_embs)[0]
-        available_mask = np.array([0.0 if i in used_title_idxs else 1.0 for i in range(len(sims))])
-        masked_sims    = sims * available_mask
-        best_idx       = int(masked_sims.argmax())
-        best_sim       = float(masked_sims[best_idx])
+        sims = cosine_similarity(abstract_embs[abs_idx : abs_idx + 1], title_embs)[0]
+        available_mask = np.array(
+            [0.0 if i in used_title_idxs else 1.0 for i in range(len(sims))]
+        )
+        masked_sims = sims * available_mask
+        best_idx = int(masked_sims.argmax())
+        best_sim = float(masked_sims[best_idx])
         return best_idx, best_sim
 
-    matched_pairs = list(map(
-        lambda abs_idx: (abs_idx, *match_abstract_theme(abs_idx)),
-        range(len(abstract_themes)),
-    ))
+    matched_pairs = list(
+        map(
+            lambda abs_idx: (abs_idx, *match_abstract_theme(abs_idx)),
+            range(len(abstract_themes)),
+        )
+    )
 
     def claim_match(triple):
         abs_idx, title_idx, sim = triple
@@ -769,8 +881,8 @@ def generate_comparison_csv() -> str:
 
     def make_row(triple):
         abs_idx, title_idx, sim = triple
-        at     = abstract_themes[abs_idx]
-        tt     = title_themes[title_idx] if title_idx is not None else {}
+        at = abstract_themes[abs_idx]
+        tt = title_themes[title_idx] if title_idx is not None else {}
         a_name = at.get("theme_name", "")
         t_name = tt.get("theme_name", "")
         if not t_name:
@@ -780,41 +892,43 @@ def generate_comparison_csv() -> str:
         else:
             convergence = "DIVERGED"
         return {
-            "Abstract Theme":     a_name,
+            "Abstract Theme": a_name,
             "Abstract Sentences": at.get("total_sentences", ""),
-            "Abstract Papers":    at.get("paper_count", ""),
-            "Title Theme":        t_name,
-            "Title Sentences":    tt.get("total_sentences", ""),
-            "Title Papers":       tt.get("paper_count", ""),
-            "Similarity":         round(sim, 3) if t_name else "",
-            "Convergence":        convergence,
+            "Abstract Papers": at.get("paper_count", ""),
+            "Title Theme": t_name,
+            "Title Sentences": tt.get("total_sentences", ""),
+            "Title Papers": tt.get("paper_count", ""),
+            "Similarity": round(sim, 3) if t_name else "",
+            "Convergence": convergence,
         }
 
     rows = list(map(make_row, final_pairs))
 
     matched_title_idxs = {triple[1] for triple in final_pairs if triple[1] is not None}
-    unmatched_title_rows = list(map(
-        lambda ti: {
-            "Abstract Theme":     "",
-            "Abstract Sentences": "",
-            "Abstract Papers":    "",
-            "Title Theme":        title_themes[ti].get("theme_name", ""),
-            "Title Sentences":    title_themes[ti].get("total_sentences", ""),
-            "Title Papers":       title_themes[ti].get("paper_count", ""),
-            "Similarity":         "",
-            "Convergence":        "TITLE ONLY",
-        },
-        [i for i in range(len(title_themes)) if i not in matched_title_idxs],
-    ))
+    unmatched_title_rows = list(
+        map(
+            lambda ti: {
+                "Abstract Theme": "",
+                "Abstract Sentences": "",
+                "Abstract Papers": "",
+                "Title Theme": title_themes[ti].get("theme_name", ""),
+                "Title Sentences": title_themes[ti].get("total_sentences", ""),
+                "Title Papers": title_themes[ti].get("paper_count", ""),
+                "Similarity": "",
+                "Convergence": "TITLE ONLY",
+            },
+            [i for i in range(len(title_themes)) if i not in matched_title_idxs],
+        )
+    )
     rows = rows + unmatched_title_rows
 
     df = pd.DataFrame(rows)
     df.to_csv(CHECKPOINT_DIR / "comparison.csv", index=False)
 
-    converged     = sum(1 for r in rows if r["Convergence"] == "CONVERGED")
+    converged = sum(1 for r in rows if r["Convergence"] == "CONVERGED")
     abstract_only = sum(1 for r in rows if r["Convergence"] == "ABSTRACT ONLY")
-    title_only    = sum(1 for r in rows if r["Convergence"] == "TITLE ONLY")
-    diverged      = sum(1 for r in rows if r["Convergence"] == "DIVERGED")
+    title_only = sum(1 for r in rows if r["Convergence"] == "TITLE ONLY")
+    diverged = sum(1 for r in rows if r["Convergence"] == "DIVERGED")
 
     return (
         f"Comparison CSV generated (semantic matching, threshold={CONVERGENCE_THRESHOLD}).\n"
@@ -837,34 +951,36 @@ def export_narrative(run_key: str = "abstract") -> str:
     """Generate a 500-word Section 7 narrative draft for a literature review paper.
     Uses final themes and PAJAIS taxonomy mapping. Saves narrative.txt."""
 
-    themes_path   = CHECKPOINT_DIR / f"themes_{run_key}.json"
+    themes_path = CHECKPOINT_DIR / f"themes_{run_key}.json"
     taxonomy_path = CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json"
 
-    assert themes_path.exists(), \
+    assert themes_path.exists(), (
         f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
-    assert taxonomy_path.exists(), \
+    )
+    assert taxonomy_path.exists(), (
         f"taxonomy_map_{run_key}.json not found. Call compare_with_taxonomy(run_key='{run_key}') first."
+    )
 
-    themes   = json.loads(themes_path.read_text())
+    themes = json.loads(themes_path.read_text())
     taxonomy = json.loads(taxonomy_path.read_text())
 
     tax_lookup = {t["theme_name"]: t for t in taxonomy}
 
     def theme_summary(t):
-        tax        = tax_lookup.get(t["theme_name"], {})
-        pajais     = tax.get("pajais_match", "NOVEL")
+        tax = tax_lookup.get(t["theme_name"], {})
+        pajais = tax.get("pajais_match", "NOVEL")
         novel_flag = "[NOVEL]" if tax.get("is_novel", False) else f"[PAJAIS: {pajais}]"
         return f"- {t['theme_name']} ({t['total_sentences']} sentences) {novel_flag}"
 
     themes_summary = "\n".join(list(map(theme_summary, themes)))
-    novel_themes   = [
+    novel_themes = [
         t["theme_name"]
         for t in themes
         if tax_lookup.get(t["theme_name"], {}).get("is_novel", False)
     ]
     novel_list = ", ".join(novel_themes) if novel_themes else "none identified"
 
-    llm    = ChatGroq(model=GROQ_MODEL, temperature=0.3)
+    llm = ChatGroq(model=GROQ_MODEL, temperature=0.3)
     prompt = PromptTemplate.from_template(
         """You are writing Section 7 of a conference paper on topic modelling of a journal's literature.
 
@@ -889,7 +1005,7 @@ Write in formal academic English. Cite Braun & Clarke (2006), Grootendorst (2022
 """
     )
 
-    chain    = prompt | llm
+    chain = prompt | llm
     response = chain.invoke(
         {"run_key": run_key, "themes_summary": themes_summary, "novel_list": novel_list}
     )

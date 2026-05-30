@@ -245,8 +245,8 @@ KEY REFERENCES (cite these when relevant)
 
 # ─── Agent Factory ────────────────────────────────────────────────────────────
 
-from langgraph.prebuilt import create_react_agent, ToolNode
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode
+
 
 def create_agent():
     llm = ChatGroq(
@@ -267,6 +267,8 @@ def create_agent():
         checkpointer=memory,
     )
     return agent
+
+
 # ─── Convenience invoke wrapper ───────────────────────────────────────────────
 
 
