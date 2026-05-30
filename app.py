@@ -25,16 +25,16 @@ try:
             return "Any"
         return _orig_parse(schema, defs)
 
-    _gcu._json_schema_to_python_type = _safe_parse
-except ImportError, AttributeError:
+    _gcu._json_schema_to_python_type = _safe_parse  # ty:ignore[invalid-assignment]
+except (ImportError, AttributeError):
     pass
 
 # Patch 2: fix localhost check failing inside Docker (no-op on HF Spaces)
 try:
     import gradio.networking as _gnet
 
-    _gnet.is_localhost_accessible = lambda: True
-except ImportError, AttributeError:
+    _gnet.is_localhost_accessible = lambda: True  # ty:ignore[unresolved-attribute]
+except (ImportError, AttributeError):
     pass
 # ── END PATCHES ────────────────────────────────────────────────────────────
 import json
@@ -239,7 +239,7 @@ def get_download_files() -> list:
 # ─── Helper: Parse submitted review table → theme_map JSON ───────────────────
 
 
-def parse_review_table_to_theme_map(table_data) -> str:
+def parse_review_table_to_theme_map(table_data) -> dict:
     import pandas as pd
 
     # Gradio 5.x returns a DataFrame; convert to plain list-of-lists

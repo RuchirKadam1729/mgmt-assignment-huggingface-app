@@ -251,7 +251,6 @@ from langgraph.prebuilt import ToolNode
 def create_agent():
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
-        groq_api_key=os.environ.get("GROQ_API_KEY"),
         temperature=0.1,
         disable_streaming=True,
     )
@@ -272,9 +271,7 @@ def create_agent():
 # ─── Convenience invoke wrapper ───────────────────────────────────────────────
 
 
-def invoke_agent(
-    agent, user_message: str, thread_id: str = "default", uploaded_file: str = None
-) -> str:
+def invoke_agent(agent, user_message: str, thread_id: str = "default", uploaded_file: str | None = None) -> str:
     """Invoke the agent with a user message. Returns the text response."""
     config = {"configurable": {"thread_id": thread_id}}
 

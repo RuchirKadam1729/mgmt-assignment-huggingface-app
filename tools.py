@@ -1010,7 +1010,7 @@ Write in formal academic English. Cite Braun & Clarke (2006), Grootendorst (2022
         {"run_key": run_key, "themes_summary": themes_summary, "novel_list": novel_list}
     )
 
-    narrative = response.content
+    narrative = response.content if isinstance(response.content, str) else str(response.content)
     (CHECKPOINT_DIR / "narrative.txt").write_text(narrative)
 
     return (
