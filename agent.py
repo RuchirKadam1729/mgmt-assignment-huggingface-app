@@ -271,7 +271,12 @@ def create_agent():
 # ─── Convenience invoke wrapper ───────────────────────────────────────────────
 
 
-def invoke_agent(agent, user_message: str, thread_id: str = "default", uploaded_file: str | None = None) -> str:
+def invoke_agent(
+    agent,
+    user_message: str,
+    thread_id: str = "default",
+    uploaded_file: str | None = None,
+) -> str:
     """Invoke the agent with a user message. Returns the text response."""
     config = {"configurable": {"thread_id": thread_id}}
 
