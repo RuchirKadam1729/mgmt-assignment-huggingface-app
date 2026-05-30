@@ -8,7 +8,6 @@ Architecture:
   - ZERO business logic in this file — all decisions flow from the LLM reading the prompt
 """
 
-import os
 from langchain_groq import ChatGroq
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver

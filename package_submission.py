@@ -8,7 +8,9 @@ Usage:
     python package_submission.py
 """
 
-import json, csv, shutil, textwrap
+import json
+import csv
+import shutil
 from pathlib import Path
 
 # pip install reportlab --break-system-packages (or uv add reportlab)
@@ -20,9 +22,6 @@ from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
     Spacer,
-    Table,
-    TableStyle,
-    PageBreak,
 )
 
 CHECKPOINTS = Path("checkpoints")
