@@ -25,8 +25,7 @@ class _KeyRotator:
 
     def __init__(self):
         self._lock = threading.Lock()
-        keys = [os.environ.get(f"GROQ_API_KEY_{i}") for i in range(2, 10)]
-        keys = [os.environ.get("GROQ_API_KEY")] + [k for k in keys if k]
+        keys = [v for k, v in os.environ.items() if k.startswith("GROQ_API_KEY") and v]
         keys = [k for k in keys if k]
         self._cycle = itertools.cycle(keys)
         self._keys = keys
