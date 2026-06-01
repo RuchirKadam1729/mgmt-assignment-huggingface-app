@@ -42,7 +42,7 @@ try:
         return _orig_parse(schema, defs)
 
     _gcu._json_schema_to_python_type = _safe_parse  # ty:ignore[invalid-assignment]
-except ImportError, AttributeError:
+except (ImportError, AttributeError):
     pass
 
 # ─── Config ───────────────────────────────────────────────────────────────────
