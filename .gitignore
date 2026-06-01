@@ -14,3 +14,4 @@ __pycache__/
 submission
 **/*.csv
 **/*.json
+**/*.zip
