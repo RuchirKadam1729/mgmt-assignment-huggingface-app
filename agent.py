@@ -13,6 +13,32 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from tools import ALL_TOOLS
 
+
+# ─── Groq Key Rotator ────────────────────────────────────────────────────────
+
+import itertools
+import threading
+
+
+class _KeyRotator:
+    """Cycles through all GROQ_API_KEY* env vars. Thread-safe."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        keys = [os.environ.get(f"GROQ_API_KEY_{i}") for i in range(2, 10)]
+        keys = [os.environ.get("GROQ_API_KEY")] + [k for k in keys if k]
+        keys = [k for k in keys if k]
+        self._cycle = itertools.cycle(keys)
+        self._keys = keys
+        print(f"[KeyRotator] {len(keys)} Groq API key(s) loaded.")
+
+    def next(self) -> str:
+        with self._lock:
+            return next(self._cycle)
+
+
+KEY_ROTATOR = _KeyRotator()
+
 # ─── System Prompt ───────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """
@@ -250,6 +276,7 @@ from langgraph.prebuilt import ToolNode
 def create_agent():
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
+        api_key=KEY_ROTATOR.next(),
         temperature=0.1,
         disable_streaming=True,
     )
@@ -283,14 +310,29 @@ def invoke_agent(
     if uploaded_file:
         content = f"The user has uploaded a CSV file at path: {uploaded_file}\n\n{user_message}"
 
-    result = agent.invoke({"messages": [("human", content)]}, config=config)
-    messages = result.get("messages", [])
-    last_ai = next(
-        (
-            m
-            for m in reversed(messages)
-            if hasattr(m, "content") and m.__class__.__name__ == "AIMessage"
-        ),
-        None,
-    )
-    return last_ai.content if last_ai else "No response from agent."
+    try:
+        result = agent.invoke({"messages": [("human", content)]}, config=config)
+        messages = result.get("messages", [])
+        last_ai = next(
+            (
+                m
+                for m in reversed(messages)
+                if hasattr(m, "content") and m.__class__.__name__ == "AIMessage"
+            ),
+            None,
+        )
+        return last_ai.content if last_ai else "No response from agent."
+    except Exception as e:
+        err = str(e)
+        if "rate_limit_exceeded" in err or "429" in err:
+            import re
+
+            wait = re.search(r"try again in (.+?)\.", err)
+            wait_str = wait.group(1) if wait else "~1 hour"
+            return (
+                f"⚠️ **Groq rate limit reached** — daily token quota exhausted.\n\n"
+                f"Please try again in **{wait_str}**.\n"
+                f"If this keeps happening, ask the group to add GROQ_API_KEY_2 / GROQ_API_KEY_3 "
+                f"in HuggingFace Space secrets (Settings → Secrets)."
+            )
+        return f"⚠️ Agent error: {err[:300]}"

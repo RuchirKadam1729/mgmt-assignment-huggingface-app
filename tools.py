@@ -430,7 +430,14 @@ Topics:
         time.sleep(idx * 6)  # stagger starts: model 0 → 0s, 1 → 6s, 2 → 12s
 
         # max_tokens=4096: prevents truncated JSON when the model hits its output limit
-        llm = ChatGroq(model=model_name, temperature=0.1, max_tokens=4096)
+        from agent import KEY_ROTATOR
+
+        llm = ChatGroq(
+            model=model_name,
+            api_key=KEY_ROTATOR.next(),
+            temperature=0.1,
+            max_tokens=4096,
+        )
         chain = labeling_prompt | llm | parser
 
         label_batches = [
@@ -499,7 +506,11 @@ No preamble, no markdown, no backticks.
 """
     )
 
-    council_llm = ChatGroq(model=GROQ_MODEL, temperature=0.0, max_tokens=4096)
+    from agent import KEY_ROTATOR
+
+    council_llm = ChatGroq(
+        model=GROQ_MODEL, api_key=KEY_ROTATOR.next(), temperature=0.0, max_tokens=4096
+    )
     council_chain = council_prompt | council_llm | parser
 
     COUNCIL_BATCH = 20
@@ -685,7 +696,9 @@ def compare_with_taxonomy(run_key: str) -> str:
     )
 
     themes = json.loads((CHECKPOINT_DIR / f"themes_{run_key}.json").read_text())
-    llm = ChatGroq(model=GROQ_MODEL, temperature=0.1)
+    from agent import KEY_ROTATOR
+
+    llm = ChatGroq(model=GROQ_MODEL, api_key=KEY_ROTATOR.next(), temperature=0.1)
 
     categories_text = "\n".join(
         [f"  {i + 1}. {c}" for i, c in enumerate(PAJAIS_CATEGORIES)]
@@ -980,7 +993,9 @@ def export_narrative(run_key: str = "abstract") -> str:
     ]
     novel_list = ", ".join(novel_themes) if novel_themes else "none identified"
 
-    llm = ChatGroq(model=GROQ_MODEL, temperature=0.3)
+    from agent import KEY_ROTATOR
+
+    llm = ChatGroq(model=GROQ_MODEL, api_key=KEY_ROTATOR.next(), temperature=0.3)
     prompt = PromptTemplate.from_template(
         """You are writing Section 7 of a conference paper on topic modelling of a journal's literature.
 
