@@ -26,7 +26,7 @@ try:
         return _orig_parse(schema, defs)
 
     _gcu._json_schema_to_python_type = _safe_parse  # ty:ignore[invalid-assignment]
-except ImportError, AttributeError:
+except (ImportError, AttributeError):
     pass
 
 # Patch 2: fix localhost check failing inside Docker (no-op on HF Spaces)
@@ -34,7 +34,7 @@ try:
     import gradio.networking as _gnet
 
     _gnet.is_localhost_accessible = lambda: True  # ty:ignore[unresolved-attribute]
-except ImportError, AttributeError:
+except (ImportError, AttributeError):
     pass
 # ── END PATCHES ────────────────────────────────────────────────────────────
 import json
