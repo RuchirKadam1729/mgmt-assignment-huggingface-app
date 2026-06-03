@@ -8,8 +8,8 @@ Rules enforced:
   - ALL tools are stateless: take input → produce output, nothing else
 
 FIX (2026-05-04): Replaced DBSCAN with AgglomerativeClustering.
-  DBSCAN with eps=0.35 chains all academic sentences into 1 cluster (chaining problem).
-  AgglomerativeClustering with distance_threshold=0.35 cuts at a hard boundary →
+  DBSCAN with eps=1.5 chains all academic sentences into 1 cluster (chaining problem).
+  AgglomerativeClustering with distance_threshold=1.5 cuts at a hard boundary →
   produces 80-120 distinct topic clusters from the same corpus.
 
 FIX (2026-05-30): Batched per-model labeling calls (LABEL_BATCH_SIZE=15).

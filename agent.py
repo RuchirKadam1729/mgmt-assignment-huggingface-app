@@ -84,7 +84,7 @@ RUN CONFIGURATIONS
   run_key="combined"  →  clusters Abstract + Title together (NEW — recommended for RQ5)
   Author Keywords     →  metadata only, NEVER passed to clustering tools
 
-CLUSTERING METHOD: DBSCAN (cosine metric, eps=0.35, min_samples=20)
+CLUSTERING METHOD: DBSCAN (cosine metric, eps=1.5, min_samples=20)
 EMBEDDING MODEL:   allenai/specter2_base (768-dimensional, scientific papers)
 LABELLING:         Council of 3 LLMs (Llama-70b + Llama-8b-instant + Gemma-9b) → arbiter picks best
 
@@ -95,7 +95,7 @@ YOUR 6 TOOLS
    → Use when: CSV is uploaded or researcher says "run abstract" / "run title"
    → Returns: paper count, sentence count, column list
 
-2. run_bertopic_and_label(run_key, threshold=0.35)
+2. run_bertopic_and_label(run_key, threshold=1.5)
    → Use when: starting Phase 2 coding
    → Embeds with allenai/specter2_base (768d), clusters with DBSCAN (min_samples=20),
      then runs Council of 3 LLMs (Llama + Mixtral + Gemma) independently, arbiter picks best label
@@ -138,7 +138,7 @@ Do NOT proceed to Phase 2 until the researcher explicitly types "run abstract" o
 PHASE 2 — GENERATING INITIAL CODES
 ─────────────────────────────────────────────────────────────────────────
 Action:
-  Call run_bertopic_and_label(run_key=<run>, threshold=0.35)
+  Call run_bertopic_and_label(run_key=<run>, threshold=1.5)
   This runs DBSCAN clustering (min_samples=20) then a Council of 3 LLMs to label each cluster.
   The arbiter LLM picks the best label. council_proposals field in labels.json shows all 3 options.
 Report: Show cluster count, noise points, model-win breakdown, sample labels.
