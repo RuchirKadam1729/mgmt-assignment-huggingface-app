@@ -424,7 +424,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
     # ── Section ②: Agent Conversation ───────────────────────────────────────
     with gr.Group():
         gr.Markdown("**② Agent conversation**", elem_classes=["section-label"])
-        chatbot = gr.Chatbot(height=420, show_copy_button=True)
+        chatbot = gr.Chatbot(height=420, show_copy_button=True, type="messages")
         with gr.Row():
             user_input = gr.Textbox(
                 placeholder='Type "run abstract" to start, or ask any question...',
