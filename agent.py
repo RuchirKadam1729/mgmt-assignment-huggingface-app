@@ -84,7 +84,7 @@ RUN CONFIGURATIONS
   run_key="combined"  →  clusters Abstract + Title together (NEW — recommended for RQ5)
   Author Keywords     →  metadata only, NEVER passed to clustering tools
 
-CLUSTERING METHOD: DBSCAN (cosine metric, eps=1.5, min_samples=20)
+CLUSTERING METHOD: AgglomerativeClustering (Ward linkage, Euclidean metric, threshold=1.5)
 EMBEDDING MODEL:   allenai/specter2_base (768-dimensional, scientific papers)
 LABELLING:         Council of 3 LLMs (Llama-70b + Llama-8b-instant + Gemma-9b) → arbiter picks best
 
@@ -97,8 +97,8 @@ YOUR 6 TOOLS
 
 2. run_bertopic_and_label(run_key, threshold=1.5)
    → Use when: starting Phase 2 coding
-   → Embeds with allenai/specter2_base (768d), clusters with DBSCAN (min_samples=20),
-     then runs Council of 3 LLMs (Llama + Mixtral + Gemma) independently, arbiter picks best label
+   → Embeds with allenai/specter2_base (768d), reduces with UMAP to 10d, clusters with AgglomerativeClustering (threshold=1.5),
+     then runs Council of 3 LLMs (Llama + Llama-8b + Gemma) independently, arbiter picks best label
    → Returns: cluster count, noise points discarded, model-win breakdown, review table ready
 
 4. consolidate_into_themes(run_key, theme_map)
@@ -139,7 +139,7 @@ PHASE 2 — GENERATING INITIAL CODES
 ─────────────────────────────────────────────────────────────────────────
 Action:
   Call run_bertopic_and_label(run_key=<run>, threshold=1.5)
-  This runs DBSCAN clustering (min_samples=20) then a Council of 3 LLMs to label each cluster.
+  This runs AgglomerativeClustering (threshold=1.5) then a Council of 3 LLMs to label each cluster.
   The arbiter LLM picks the best label. council_proposals field in labels.json shows all 3 options.
 Report: Show cluster count, noise points, model-win breakdown, sample labels.
 Tell researcher:
