@@ -8,16 +8,20 @@ Architecture:
   - ZERO business logic in this file — all decisions flow from the LLM reading the prompt
 """
 
-from langchain_groq import ChatGroq
-from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import MemorySaver
-from tools import ALL_TOOLS
-
-
 # ─── Groq Key Rotator ────────────────────────────────────────────────────────
-
 import itertools
 import threading
+
+from langchain.agents import create_agent
+from langchain_groq import ChatGroq
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import (
+    ToolNode,
+    create_react_agent,  # ty:ignore[deprecated]
+)
+from pydantic import SecretStr
+
+from tools import ALL_TOOLS
 
 
 class _KeyRotator:
@@ -26,6 +30,7 @@ class _KeyRotator:
     def __init__(self):
         self._lock = threading.Lock()
         import os
+
         keys = [v for k, v in os.environ.items() if k.startswith("GROQ_API_KEY") and v]
         keys = [k for k in keys if k]
         self._cycle = itertools.cycle(keys)
@@ -270,20 +275,18 @@ KEY REFERENCES (cite these when relevant)
 
 # ─── Agent Factory ────────────────────────────────────────────────────────────
 
-from langgraph.prebuilt import ToolNode
-
 
 def create_agent():
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
-        api_key=KEY_ROTATOR.next(),
+        api_key=SecretStr(KEY_ROTATOR.next()),
         temperature=0.1,
         disable_streaming=True,
     )
     memory = MemorySaver()
 
     # handle_tool_error goes here, on the ToolNode — not on @tool
-    tool_node = ToolNode(ALL_TOOLS, handle_tool_errors=True)
+    ToolNode(ALL_TOOLS, handle_tool_errors=True)
 
     agent = create_react_agent(
         llm,

@@ -8,19 +8,20 @@ Usage:
     python package_submission.py
 """
 
-import json
 import csv
+import json
 import shutil
 from pathlib import Path
 
+from reportlab.lib import colors
+
 # pip install reportlab --break-system-packages (or uv add reportlab)
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.lib import colors
 from reportlab.platypus import (
-    SimpleDocTemplate,
     Paragraph,
+    SimpleDocTemplate,
     Spacer,
 )
 

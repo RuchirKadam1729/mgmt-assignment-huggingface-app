@@ -12,6 +12,11 @@ Rules:
   - app.py only handles UI events, routing messages to the agent, and rendering outputs
 """
 
+import shutil
+import uuid
+
+import pandas as pd
+
 # ── PATCHES — must be first, before any other import ──────────────────────
 
 # Patch 1: handle non-dict schemas (LangChain tool schema incompatibility)
@@ -26,7 +31,7 @@ try:
         return _orig_parse(schema, defs)
 
     _gcu._json_schema_to_python_type = _safe_parse  # ty:ignore[invalid-assignment]
-except (ImportError, AttributeError):
+except ImportError, AttributeError:
     pass
 
 # Patch 2: fix localhost check failing inside Docker (no-op on HF Spaces)
@@ -34,12 +39,14 @@ try:
     import gradio.networking as _gnet
 
     _gnet.is_localhost_accessible = lambda: True  # ty:ignore[unresolved-attribute]
-except (ImportError, AttributeError):
+except ImportError, AttributeError:
     pass
 # ── END PATCHES ────────────────────────────────────────────────────────────
 import json
-import gradio as gr
 from pathlib import Path
+
+import gradio as gr
+
 from agent import create_agent, invoke_agent
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -76,7 +83,6 @@ CHART_OPTIONS = {
 
 # ─── Agent Singleton ──────────────────────────────────────────────────────────
 
-import uuid
 
 agent = create_agent()
 THREAD_ID = f"bertopic-session-{uuid.uuid4().hex[:8]}"
@@ -240,11 +246,12 @@ def get_download_files() -> list:
 
 
 def parse_review_table_to_theme_map(table_data) -> dict:
-    import pandas as pd
 
     # Gradio 5.x returns a DataFrame; convert to plain list-of-lists
     if isinstance(table_data, pd.DataFrame):
         rows = table_data.values.tolist()
+    elif isinstance(table_data, dict) and "data" in table_data:
+        rows = table_data["data"]
     else:
         rows = table_data or []
 
@@ -276,13 +283,13 @@ def parse_review_table_to_theme_map(table_data) -> dict:
 
 # ─── Gradio Application ───────────────────────────────────────────────────────
 def on_approve_all(table_data):
-    import pandas as pd
 
-    rows = (
-        table_data.values.tolist()
-        if isinstance(table_data, pd.DataFrame)
-        else list(table_data or [])
-    )
+    if isinstance(table_data, pd.DataFrame):
+        rows = table_data.values.tolist()
+    elif isinstance(table_data, dict) and "data" in table_data:
+        rows = table_data["data"]
+    else:
+        rows = list(table_data or [])
     return [
         [r[0], r[1], r[2], r[3], r[4], "yes", r[6], r[7]] if len(r) > 5 else r
         for r in rows
@@ -290,13 +297,13 @@ def on_approve_all(table_data):
 
 
 def on_reject_all(table_data):
-    import pandas as pd
 
-    rows = (
-        table_data.values.tolist()
-        if isinstance(table_data, pd.DataFrame)
-        else list(table_data or [])
-    )
+    if isinstance(table_data, pd.DataFrame):
+        rows = table_data.values.tolist()
+    elif isinstance(table_data, dict) and "data" in table_data:
+        rows = table_data["data"]
+    else:
+        rows = list(table_data or [])
     return [
         [r[0], r[1], r[2], r[3], r[4], "no", r[6], r[7]] if len(r) > 5 else r
         for r in rows
@@ -304,7 +311,6 @@ def on_reject_all(table_data):
 
 
 def on_auto_flag_boilerplate(table_data):
-    import pandas as pd
 
     SIGNALS = [
         "copyright",
@@ -315,11 +321,12 @@ def on_auto_flag_boilerplate(table_data):
         "open access",
         "publisher",
     ]
-    rows = (
-        table_data.values.tolist()
-        if isinstance(table_data, pd.DataFrame)
-        else list(table_data or [])
-    )
+    if isinstance(table_data, pd.DataFrame):
+        rows = table_data.values.tolist()
+    elif isinstance(table_data, dict) and "data" in table_data:
+        rows = table_data["data"]
+    else:
+        rows = list(table_data or [])
 
     def flag(r):
         if len(r) <= 5:
@@ -556,7 +563,6 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
     # ─── Event: CSV Upload ────────────────────────────────────────────────────
 
     def on_csv_upload(file_obj, history, thread_id):
-        import shutil
 
         if file_obj is None:
             return history, gr.update(), None

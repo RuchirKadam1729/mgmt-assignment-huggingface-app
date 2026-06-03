@@ -23,12 +23,12 @@ Requirements:  pip install gradio_client huggingface_hub requests
 """
 
 import argparse
-import json
-import sys
-import time
-import random
-import tempfile
 import csv
+import json
+import random
+import sys
+import tempfile
+import time
 from pathlib import Path
 
 try:
@@ -42,7 +42,7 @@ try:
         return _orig_parse(schema, defs)
 
     _gcu._json_schema_to_python_type = _safe_parse  # ty:ignore[invalid-assignment]
-except (ImportError, AttributeError):
+except ImportError, AttributeError:
     pass
 
 # ─── Config ───────────────────────────────────────────────────────────────────
