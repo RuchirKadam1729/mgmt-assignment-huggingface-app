@@ -377,7 +377,7 @@ def show_api(space_id: str, token: str):
     from gradio_client import Client
 
     print(f"Connecting to {space_id} ...\n")
-    client = Client(space_id, hf_token=token)
+    client = Client(space_id, token=token)
     print("Available API endpoints:\n")
     client.view_api()
 
@@ -385,7 +385,7 @@ def show_api(space_id: str, token: str):
 # ─── Full pipeline smoke test ─────────────────────────────────────────────────
 
 
-def smoke_test(space_id: str, csv_path: str, hf_token: str, run_key: str):
+def smoke_test(space_id: str, csv_path: str, token: str, run_key: str):
     from gradio_client import Client, handle_file
 
     print(f"\n{'─' * 55}")
@@ -403,7 +403,7 @@ def smoke_test(space_id: str, csv_path: str, hf_token: str, run_key: str):
     step(1, "Connecting to Space (may take 30s if sleeping)...")
     t = time.time()
     try:
-        client = Client(space_id, hf_token=hf_token)
+        client = Client(space_id, token=token)
         ok(f"Connected — {elapsed(t)}")
     except Exception as e:
         fail(f"Connection failed: {e}")
@@ -524,7 +524,7 @@ def smoke_test(space_id: str, csv_path: str, hf_token: str, run_key: str):
 
 def main():
     args = parse_args()
-    token = args.log_token or args.hf_token
+    token = args.log_token or args.token
 
     if args.status:
         if not token:
@@ -541,14 +541,14 @@ def main():
         return
 
     if args.show_api:
-        if not args.hf_token:
+        if not args.token:
             print("Need --hf-token to connect")
             sys.exit(1)
-        show_api(args.space_id, args.hf_token)
+        show_api(args.space_id, args.token)
         return
 
     # ── Smoke test mode ────────────────────────────────────────────────────
-    if not args.hf_token:
+    if not args.token:
         print("Need --hf-token to run the smoke test")
         sys.exit(1)
 
@@ -569,7 +569,7 @@ def main():
     success = smoke_test(
         space_id=args.space_id,
         csv_path=csv_path,
-        hf_token=args.hf_token,
+        token=args.token,
         run_key=args.run_key,
     )
     sys.exit(0 if success else 1)

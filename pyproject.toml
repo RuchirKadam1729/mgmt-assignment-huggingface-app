@@ -2,27 +2,27 @@
 name = "mgmt-assignment-huggingface-app"
 version = "0.1.0"
 description = "Add your description here"
+requires-python = ">=3.12"
 readme = "README.md"
-requires-python = ">=3.14"
 dependencies = [
-    "git-filter-repo>=2.47.0",
-    "gradio>=6.7.0",             # <--- Bumped to fix CVE-2026-28414
-    "groq>=0.9.0",
-    "huggingface-hub==0.25.1",
-    "langchain-core>=0.3.0",
-    "langchain-groq>=0.2.0",
-    "langgraph>=0.2.0",
-    "nltk>=3.9.0",
-    "numpy>=1.26.0",
-    "pandas>=2.2.0",
-    "pillow>=12.2.0",            # <--- Added to fix Image processing CVEs
-    "plotly>=5.24.0",
-    "python-multipart>=0.0.27",  # <--- Added to fix DoS CVEs
-    "reportlab>=4.5.1",
-    "scikit-learn>=1.5.0",
-    "sentence-transformers>=3.0.0",
-    "starlette>=1.0.1",          # <--- Added to fix BadHost CVE
-    "torch>=2.3.0",
-    "transformers>=4.53.0",      # <--- Bumped to fix ReDoS and Arbitrary Code Execution
-    "umap-learn>=0.5.6",
+    "git-filter-repo",
+    "gradio",             
+    "groq",
+    "huggingface-hub",   
+    "langchain-core",
+    "langchain-groq",
+    "langgraph",
+    "nltk",
+    "numpy",
+    "pandas",
+    "pillow",            
+    "plotly",
+    "python-multipart",  
+    "reportlab",
+    "scikit-learn",
+    "sentence-transformers",
+    "starlette",          
+    "torch",
+    "transformers",      
+    "umap-learn",
 ]
