@@ -342,7 +342,7 @@ wheels = [
 
 [[package]]
 name = "gradio"
-version = "5.6.0"
+version = "5.15.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -375,12 +375,12 @@ dependencies = [
     { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/19/c6/bfab4a8c332e7c1f0c6c73213335a4980b516508a3900ce34a5d0400ae0b/gradio-5.6.0-py3-none-any.whl", hash = "sha256:6eba135b32fb2fcb5d83fa845f6ad57c033894d5218fd3010de8fb4d735b9b6d", size = 57119090, upload-time = "2024-11-16T00:34:05.175Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/28/6a52bac8b13aca4f76baef03d5f840cc1f7486e879bc1ee19df51b7590d2/gradio-5.15.0-py3-none-any.whl", hash = "sha256:b0d72bf1e70c4a08283066c510d03bbdb9e378c1f806dd948e333c75bb22b3f1", size = 57766589, upload-time = "2025-02-05T05:39:06.109Z" },
 ]
 
 [[package]]
 name = "gradio-client"
-version = "1.4.3"
+version = "1.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fsspec" },
@@ -390,9 +390,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f6/6a/1cea32337a15894c97ffd46ab67ffb474d7459cc62b5e548b01ab54d2061/gradio_client-1.4.3.tar.gz", hash = "sha256:55fd446ae80a5320f164b6913e8862b398fca9097d33b76bd98efb61cbd449c3", size = 318161, upload-time = "2024-11-16T00:34:16.029Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c5/78/e5a4a2b0f4d1ba01ec4169e181a3134fc65b6360d40817070892c3557000/gradio_client-1.7.0.tar.gz", hash = "sha256:87f6ade197951f38bac0431b2a436a8ebb2f33b2ceba2ef8e1e5bef8d8b238e4", size = 320039, upload-time = "2025-01-30T22:43:55.427Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/eb/e4875e6803531059026d82fe96d0cbddae0d4d6a8826b926e02d5399b816/gradio_client-1.4.3-py3-none-any.whl", hash = "sha256:a76990277cab011f1c49391bdf33670bbbbb32b3503971ae5d91281e7946bdc1", size = 320062, upload-time = "2024-11-16T00:34:13.296Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/c1/def2bd93b8beab342c443bf5ac47f85e48b78eca010bbff51d6978472a3f/gradio_client-1.7.0-py3-none-any.whl", hash = "sha256:b403570c67f121ebbbc19ac1f0afa2ab1bab085ce60d96eb190832fe871aa946", size = 321900, upload-time = "2025-01-30T22:43:53.352Z" },
 ]
 
 [[package]]
@@ -768,7 +768,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "git-filter-repo" },
-    { name = "gradio", specifier = "==5.6.0" },
+    { name = "gradio", specifier = "==5.15.0" },
     { name = "groq" },
     { name = "huggingface-hub" },
     { name = "langchain-core" },
@@ -1437,11 +1437,11 @@ wheels = [
 
 [[package]]
 name = "python-multipart"
-version = "0.0.12"
+version = "0.0.30"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/16/6e/7ecfe1366b9270f7f475c76fcfa28812493a6a1abd489b2433851a444f4f/python_multipart-0.0.12.tar.gz", hash = "sha256:045e1f98d719c1ce085ed7f7e1ef9d8ccc8c02ba02b5566d5f7521410ced58cb", size = 35713, upload-time = "2024-09-29T08:12:25.746Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4b/82/c8cd43a6e0719bf5a3b034f6726dd701f75829c08944c83d4b95d02ed0e8/python_multipart-0.0.30.tar.gz", hash = "sha256:0edfe0475c1f46ddd3ff7785a626f6118af32bdcf359bb21260367313bb32118", size = 46316, upload-time = "2026-05-31T19:24:55.198Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f5/0b/c316262244abea7481f95f1e91d7575f3dfcf6455d56d1ffe9839c582eb1/python_multipart-0.0.12-py3-none-any.whl", hash = "sha256:43dcf96cf65888a9cd3423544dd0d75ac10f7aa0c3c28a175bbcd00c9ce1aebf", size = 23246, upload-time = "2024-09-29T08:12:24.451Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/fd/0318007beb234790993d3ec5afd051d1dbceb733e81e3afe2b981ece3f37/python_multipart-0.0.30-py3-none-any.whl", hash = "sha256:830964def8c90607ac5daa00514e3987815865713ade8d20febc9177ac0c3c5b", size = 29730, upload-time = "2026-05-31T19:24:53.814Z" },
 ]
 
 [[package]]
