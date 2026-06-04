@@ -38,6 +38,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
 from nltk.tokenize import sent_tokenize
@@ -133,6 +134,34 @@ PAJAIS_CATEGORIES = [
     "Smart Cities and IoT",
     "Agile and DevOps Practices",
 ]
+
+# ─── Robust JSON parser (handles Qwen3-32b <think>…</think> output) ─────────
+#
+# qwen/qwen3-32b has "thinking mode" enabled by default on Groq. It prepends a
+# <think>…</think> block to its response, which makes JsonOutputParser crash with
+# "Invalid json output: Starting with Topic N: …".
+# This parser strips those blocks, then extracts the first JSON array it finds.
+
+
+def _make_json_parser() -> RunnableLambda:
+    """Return a RunnableLambda that robustly extracts a JSON array from an LLM message.
+    Handles: Qwen3 <think> blocks, stray markdown fences, leading/trailing prose."""
+
+    def _parse(msg):
+        text = msg.content if hasattr(msg, "content") else str(msg)
+        # 1. Strip <think>…</think> blocks (Qwen3 thinking mode)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        # 2. Strip markdown fences (```json … ```)
+        text = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`").strip()
+        # 3. Extract the first JSON array in the response
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+        # 4. Fallback: try the whole cleaned string
+        return json.loads(text)
+
+    return RunnableLambda(_parse)
+
 
 # ─── Tool 1: Load Scopus CSV ──────────────────────────────────────────────
 
@@ -414,7 +443,9 @@ def label_topics_with_llm(run_key: str) -> str:
         "Topics:\n{topics_text}"
     )
 
-    parser = JsonOutputParser()
+    # FIX (2026-06-04): Replace JsonOutputParser with _make_json_parser() to handle
+    # Qwen3-32b <think>…</think> blocks that precede the JSON array on Groq.
+    parser = _make_json_parser()
 
     def get_labels_from_model(idx_model):
         idx, model_name = idx_model
@@ -422,12 +453,18 @@ def label_topics_with_llm(run_key: str) -> str:
 
         from agent import KEY_ROTATOR
 
+        # FIX (2026-06-04): Disable Qwen3-32b thinking mode so it never emits
+        # <think> blocks. thinking_budget_tokens=0 is Groq's documented opt-out.
+        extra_kwargs = (
+            {"thinking_budget_tokens": 0} if "qwen" in model_name.lower() else {}
+        )
         llm = ChatGroq(
             model=model_name,
             api_key=SecretStr(KEY_ROTATOR.next()),
             temperature=0.1,
             max_tokens=4096,
             max_retries=5,
+            model_kwargs=extra_kwargs,
         )
         chain = labeling_prompt | llm | parser
 
@@ -484,7 +521,7 @@ def label_topics_with_llm(run_key: str) -> str:
         "{proposals_text}\n\n"
         "Return ONLY a JSON array:\n"
         '[{{"cluster_id": int, "label": str, "confidence": float, "reasoning": str, "winning_model": int}}]\n'
-        "winning_model: 1=Llama-70b, 2=Llama-8b, 3=Gemma, 0=synthesised.\n"
+        "winning_model: 1=Llama-70b, 2=Llama-8b, 3=Qwen3-32b, 0=synthesised.\n"
         "No preamble, no markdown, no backticks."
     )
 
@@ -576,7 +613,7 @@ def label_topics_with_llm(run_key: str) -> str:
     model_wins = dict(
         map(
             lambda pair: (pair[1], winning.count(pair[0] + 1)),
-            enumerate(["Llama-70b", "Llama-8b", "Gemma"]),
+            enumerate(["Llama-70b", "Llama-8b", "Qwen3-32b"]),
         )
     )
     synth_count = winning.count(0)
@@ -731,7 +768,8 @@ def compare_with_taxonomy(run_key: str) -> str:
         "Themes to map:\n{themes_text}"
     )
 
-    parser = JsonOutputParser()
+    # Use robust parser to guard against any future model swaps introducing thinking blocks
+    parser = _make_json_parser()
     chain = prompt | llm | parser
 
     BATCH_SIZE = 20
