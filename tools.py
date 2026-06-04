@@ -18,6 +18,11 @@ FIX (2026-05-30): Batched per-model labeling calls (LABEL_BATCH_SIZE=15).
   safely under the limit. Also added max_tokens=4096 to prevent truncated JSON.
   Replaced meta-llama/llama-4-scout-17b-16e-instruct with gemma2-9b-it (stable on
   Groq free tier, no model-name format issues).
+
+FIX (2026-06-04): Replaced decommissioned gemma2-9b-it with qwen/qwen3-32b.
+  gemma2-9b-it was shut down by Groq on 2025-10-08. llama-3.1-8b-instant (Groq's
+  official replacement) is already council[1], so qwen/qwen3-32b is used instead
+  to preserve architectural diversity in the 3-model council.
 """
 
 import json
@@ -67,7 +72,7 @@ LABEL_BATCH_SIZE = 15
 COUNCIL_MODELS = [
     "llama-3.3-70b-versatile",  # primary — high quality
     "llama-3.1-8b-instant",  # fast lightweight voice
-    "gemma2-9b-it",
+    "qwen/qwen3-32b",  # third voice — different architecture, replaces decommissioned gemma2-9b-it
 ]
 
 RUN_CONFIGS = {
