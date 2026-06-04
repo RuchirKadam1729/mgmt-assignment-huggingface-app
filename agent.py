@@ -10,6 +10,7 @@ Architecture:
 
 # ─── Groq Key Rotator ────────────────────────────────────────────────────────
 import itertools
+import re
 import threading
 
 from langchain_groq import ChatGroq
@@ -272,69 +273,123 @@ KEY REFERENCES (cite these when relevant)
 - Zhou et al. (2024) — AI-performed grounded theory, LLM + qualitative analysis
 """
 
+# ─── Shared memory (module-level singleton so it survives key rotation) ───────
+#
+# Bug fix: previously a NEW MemorySaver() was created inside create_agent(),
+# which meant any key-rotation rebuild would silently wipe conversation history.
+# Keeping one instance here ensures the thread state is always preserved.
+
+_SHARED_MEMORY = MemorySaver()
+
+# Module-level agent reference so invoke_agent can swap it on rate-limit
+# without needing app.py to know about the swap.
+_current_agent = None
+
+
 # ─── Agent Factory ────────────────────────────────────────────────────────────
 
 
-def create_agent():
+def _build_agent_with_next_key():
+    """
+    Create a fresh ReAct agent wired to the next API key in the rotation.
+    Always uses _SHARED_MEMORY so conversation history is never lost.
+
+    Bug fix: previously KEY_ROTATOR.next() was called only once at startup,
+    binding the agent to a single key for its entire lifetime.  Now every
+    rebuild advances the rotator, so each key gets used in turn.
+    """
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=SecretStr(KEY_ROTATOR.next()),
         temperature=0.1,
         disable_streaming=True,
     )
-    memory = MemorySaver()
-
-    # handle_tool_error goes here, on the ToolNode — not on @tool
-    ToolNode(ALL_TOOLS, handle_tool_errors=True)
-
-    agent = create_react_agent(
+    return create_react_agent(
         llm,
         ALL_TOOLS,
         prompt=SYSTEM_PROMPT,
-        checkpointer=memory,
+        checkpointer=_SHARED_MEMORY,   # ← shared, never recreated
     )
-    return agent
+
+
+def create_agent():
+    """Called once by app.py at startup.  Returns the agent (for API compat)."""
+    global _current_agent
+    _current_agent = _build_agent_with_next_key()
+    return _current_agent
 
 
 # ─── Convenience invoke wrapper ───────────────────────────────────────────────
 
 
 def invoke_agent(
-    agent,
-    user_message: str,
-    thread_id: str = "default",
+    agent,                          # kept for app.py call-site compatibility;
+    user_message: str,              # internally we use _current_agent so that
+    thread_id: str = "default",     # key-rotation swaps are transparent.
     uploaded_file: str | None = None,
 ) -> str:
-    """Invoke the agent with a user message. Returns the text response."""
-    config = {"configurable": {"thread_id": thread_id}}
+    """
+    Invoke the agent with a user message.
 
+    On a Groq rate-limit (429) the function:
+      1. Logs which attempt failed.
+      2. Rebuilds the agent with the next key in the rotation.
+      3. Retries — up to len(KEY_ROTATOR._keys) times total.
+    Only gives up and returns an error when every key has been tried.
+
+    Bug fix: previously the function returned an error immediately on the first
+    rate-limit hit without ever trying the other loaded API keys.
+    """
+    global _current_agent
+
+    config = {"configurable": {"thread_id": thread_id}}
     content = user_message
     if uploaded_file:
         content = f"The user has uploaded a CSV file at path: {uploaded_file}\n\n{user_message}"
 
-    try:
-        result = agent.invoke({"messages": [("human", content)]}, config=config)
-        messages = result.get("messages", [])
-        last_ai = next(
-            (
-                m
-                for m in reversed(messages)
-                if hasattr(m, "content") and m.__class__.__name__ == "AIMessage"
-            ),
-            None,
-        )
-        return last_ai.content if last_ai else "No response from agent."
-    except Exception as e:
-        err = str(e)
-        if "rate_limit_exceeded" in err or "429" in err:
-            import re
+    n_keys = len(KEY_ROTATOR._keys)
 
-            wait = re.search(r"try again in (.+?)\.", err)
-            wait_str = wait.group(1) if wait else "~1 hour"
-            return (
-                f"⚠️ **Groq rate limit reached** — daily token quota exhausted.\n\n"
-                f"Please try again in **{wait_str}**.\n"
-                f"If this keeps happening, ask the group to add GROQ_API_KEY_2 / GROQ_API_KEY_3 "
-                f"in HuggingFace Space secrets (Settings → Secrets)."
+    for attempt in range(n_keys):
+        try:
+            result = _current_agent.invoke(  # ty:ignore[unresolved-attribute]
+                {"messages": [("human", content)]}, config=config
             )
-        return f"⚠️ Agent error: {err[:300]}"
+            messages = result.get("messages", [])
+            last_ai = next(
+                (
+                    m
+                    for m in reversed(messages)
+                    if hasattr(m, "content") and m.__class__.__name__ == "AIMessage"
+                ),
+                None,
+            )
+            return last_ai.content if last_ai else "No response from agent."
+
+        except Exception as e:
+            err = str(e)
+            is_rate_limit = "rate_limit_exceeded" in err or "429" in err
+
+            if is_rate_limit and attempt < n_keys - 1:
+                # ── Rotate to the next key and rebuild the agent ──────────────
+                # _SHARED_MEMORY is reused so conversation history is preserved.
+                print(
+                    f"[KeyRotator] Rate limit on key {attempt + 1}/{n_keys}, "
+                    f"rotating to next key…"
+                )
+                _current_agent = _build_agent_with_next_key()
+                continue  # retry the same message with the new key
+
+            # ── All keys exhausted, or non-rate-limit error ───────────────────
+            if is_rate_limit:
+                wait = re.search(r"try again in (.+?)\.", err)
+                wait_str = wait.group(1) if wait else "~1 hour"
+                return (
+                    f"⚠️ **Groq rate limit reached** — all {n_keys} API key(s) exhausted.\n\n"
+                    f"Please try again in **{wait_str}**.\n"
+                    f"To add more capacity, add GROQ_API_KEY_{n_keys + 1} in "
+                    f"HuggingFace Space secrets (Settings → Secrets)."
+                )
+            return f"⚠️ Agent error: {err[:300]}"
+
+    # Should not be reached, but kept as a safety net
+    return f"⚠️ All {n_keys} API keys exhausted. Please try again later."
