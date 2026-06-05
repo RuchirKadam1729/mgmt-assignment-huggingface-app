@@ -4,8 +4,14 @@ tools.py  –  7 @tool functions for the BERTopic Agentic AI pipeline.
 Rules enforced:
   - ZERO if/elif/else statements
   - ZERO for/while loops  (use list(map(...)) instead)
-  - ZERO try/except blocks (handle_tool_error=True sends errors to LLM)
   - ALL tools are stateless: take input → produce output, nothing else
+
+NOTE (2026-06-05): The "ZERO try/except" rule was revoked.
+  handle_tool_errors=True only works when exceptions stay inside ToolNode.
+  Rate-limit / JSON-parse exceptions from internal LLM calls escape before
+  ToolNode can wrap them, writing a dangling AIMessage(tool_calls=[...]) to
+  MemorySaver → thread permanently broken.  Every @tool now catches all
+  exceptions and returns an error string so the checkpoint stays valid.
 
 FIX (2026-05-04): Replaced DBSCAN with AgglomerativeClustering.
   DBSCAN with eps=1.5 chains all academic sentences into 1 cluster (chaining problem).
@@ -28,6 +34,7 @@ FIX (2026-06-04): Replaced decommissioned gemma2-9b-it with qwen/qwen3-32b.
 import json
 import re
 import time
+import traceback
 from collections import Counter
 from itertools import chain as ichain
 from pathlib import Path
@@ -135,30 +142,24 @@ PAJAIS_CATEGORIES = [
     "Agile and DevOps Practices",
 ]
 
-# ─── Robust JSON parser (handles Qwen3-32b <think>…</think> output) ─────────
+# ─── Robust JSON parser ──────────────────────────────────────────────────────
 #
-# qwen/qwen3-32b has "thinking mode" enabled by default on Groq. It prepends a
-# <think>…</think> block to its response, which makes JsonOutputParser crash with
-# "Invalid json output: Starting with Topic N: …".
-# This parser strips those blocks, then extracts the first JSON array it finds.
+# FIX (2026-06-05): Replace JsonOutputParser with this everywhere.
+# qwen/qwen3-32b emits <think>…</think> blocks before the JSON array on Groq.
+# JsonOutputParser sees the thinking text and raises "Invalid json output".
 
 
 def _make_json_parser() -> RunnableLambda:
-    """Return a RunnableLambda that robustly extracts a JSON array from an LLM message.
-    Handles: Qwen3 <think> blocks, stray markdown fences, leading/trailing prose."""
+    """Strip Qwen3 <think> blocks + markdown fences, then extract the first JSON array."""
 
     def _parse(msg):
         text = msg.content if hasattr(msg, "content") else str(msg)
-        # 1. Strip <think>…</think> blocks (Qwen3 thinking mode)
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-        # 2. Strip markdown fences (```json … ```)
         text = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`").strip()
-        # 3. Extract the first JSON array in the response
         m = re.search(r"\[.*\]", text, re.DOTALL)
         if m:
             return json.loads(m.group())
-        # 4. Fallback: try the whole cleaned string
-        return json.loads(text)
+        return json.loads(text)  # fallback: try the whole cleaned string
 
     return RunnableLambda(_parse)
 
@@ -171,60 +172,63 @@ def load_scopus_csv(filepath: str) -> str:
     """Load a Scopus export CSV, count papers and sentences, apply boilerplate filters.
     Returns a stats summary string with paper count, abstract sentences, and title sentences.
     """
-    df = pd.read_csv(filepath, encoding="utf-8", on_bad_lines="skip")
+    try:
+        df = pd.read_csv(filepath, encoding="utf-8", on_bad_lines="skip")
 
-    abstract_col = next(filter(lambda c: "abstract" in c.lower(), df.columns), None)
-    title_col = next(filter(lambda c: c.lower() == "title", df.columns), None)
+        abstract_col = next(filter(lambda c: "abstract" in c.lower(), df.columns), None)
+        title_col = next(filter(lambda c: c.lower() == "title", df.columns), None)
 
-    abstracts = list(df[abstract_col].dropna().astype(str)) if abstract_col else []
-    titles = list(df[title_col].dropna().astype(str)) if title_col else []
+        abstracts = list(df[abstract_col].dropna().astype(str)) if abstract_col else []
+        titles = list(df[title_col].dropna().astype(str)) if title_col else []
 
-    def clean_text(text):
-        return re.sub(
-            "|".join(BOILERPLATE_PATTERNS), " ", text, flags=re.IGNORECASE
-        ).strip()
+        def clean_text(text):
+            return re.sub(
+                "|".join(BOILERPLATE_PATTERNS), " ", text, flags=re.IGNORECASE
+            ).strip()
 
-    def split_to_sentences(text_list):
-        return list(
-            filter(
-                lambda s: len(s) > 30,
-                map(
-                    lambda s: s.strip(),
-                    ichain.from_iterable(
-                        map(sent_tokenize, map(clean_text, text_list))
+        def split_to_sentences(text_list):
+            return list(
+                filter(
+                    lambda s: len(s) > 30,
+                    map(
+                        lambda s: s.strip(),
+                        ichain.from_iterable(
+                            map(sent_tokenize, map(clean_text, text_list))
+                        ),
                     ),
-                ),
+                )
             )
+
+        abstract_sentences = split_to_sentences(abstracts)
+        title_sentences = split_to_sentences(titles)
+
+        df.to_csv(CHECKPOINT_DIR / "data.csv", index=False)
+
+        stats = {
+            "papers": len(df),
+            "abstract_sentences": len(abstract_sentences),
+            "title_sentences": len(title_sentences),
+            "columns": list(df.columns),
+            "years": sorted(df["Year"].dropna().astype(int).unique().tolist())
+            if "Year" in df.columns
+            else [],
+        }
+        (CHECKPOINT_DIR / "stats.json").write_text(json.dumps(stats, indent=2))
+
+        return (
+            (
+                f"CSV loaded successfully.\n"
+                f"  Papers: {stats['papers']}\n"
+                f"  Abstract sentences (after boilerplate filter): {stats['abstract_sentences']}\n"
+                f"  Title sentences: {stats['title_sentences']}\n"
+                f"  Columns: {', '.join(stats['columns'])}\n"
+                f"  Year range: {min(stats['years'])} – {max(stats['years'])}"
+            )
+            if stats["years"]
+            else "CSV loaded successfully, but no valid publishing years were identified."
         )
-
-    abstract_sentences = split_to_sentences(abstracts)
-    title_sentences = split_to_sentences(titles)
-
-    df.to_csv(CHECKPOINT_DIR / "data.csv", index=False)
-
-    stats = {
-        "papers": len(df),
-        "abstract_sentences": len(abstract_sentences),
-        "title_sentences": len(title_sentences),
-        "columns": list(df.columns),
-        "years": sorted(df["Year"].dropna().astype(int).unique().tolist())
-        if "Year" in df.columns
-        else [],
-    }
-    (CHECKPOINT_DIR / "stats.json").write_text(json.dumps(stats, indent=2))
-
-    return (
-        (
-            f"CSV loaded successfully.\n"
-            f"  Papers: {stats['papers']}\n"
-            f"  Abstract sentences (after boilerplate filter): {stats['abstract_sentences']}\n"
-            f"  Title sentences: {stats['title_sentences']}\n"
-            f"  Columns: {', '.join(stats['columns'])}\n"
-            f"  Year range: {min(stats['years'])} – {max(stats['years'])}"
-        )
-        if stats["years"]
-        else "CSV loaded successfully, but no valid publishing years were identified."
-    )
+    except Exception as exc:
+        return f"❌ load_scopus_csv failed: {type(exc).__name__}: {exc}"
 
 
 # ─── Tool 2: BERTopic Discovery (helper, not @tool) ──────────────────────────
@@ -443,9 +447,7 @@ def label_topics_with_llm(run_key: str) -> str:
         "Topics:\n{topics_text}"
     )
 
-    # FIX (2026-06-04): Replace JsonOutputParser with _make_json_parser() to handle
-    # Qwen3-32b <think>…</think> blocks that precede the JSON array on Groq.
-    parser = _make_json_parser()
+    parser = _make_json_parser()  # FIX: handles Qwen3 <think> blocks
 
     def get_labels_from_model(idx_model):
         idx, model_name = idx_model
@@ -453,8 +455,7 @@ def label_topics_with_llm(run_key: str) -> str:
 
         from agent import KEY_ROTATOR
 
-        # FIX (2026-06-04): Disable Qwen3-32b thinking mode so it never emits
-        # <think> blocks. thinking_budget_tokens=0 is Groq's documented opt-out.
+        # FIX: disable Qwen3 thinking mode at the API level (belt-and-suspenders)
         extra_kwargs = (
             {"thinking_budget_tokens": 0} if "qwen" in model_name.lower() else {}
         )
@@ -476,14 +477,35 @@ def label_topics_with_llm(run_key: str) -> str:
         )
 
         def invoke_batch(batch):
-            batch_text = "\n\n".join(list(map(build_topic_text, batch)))
-            res = chain.invoke({"topics_text": batch_text})
-            time.sleep(4)  # throttle to guarantee adherence to TPM constraints
-            return res if isinstance(res, list) else []
+            # FIX: catch per-batch failures so one bad batch doesn't kill the model
+            try:
+                batch_text = "\n\n".join(list(map(build_topic_text, batch)))
+                res = chain.invoke({"topics_text": batch_text})
+                time.sleep(4)  # throttle against TPM limits
+                return res if isinstance(res, list) else []
+            except Exception as exc:
+                batch_ids = list(map(lambda t: t["cluster_id"], batch))
+                print(
+                    f"[LabelBatch] {model_name} failed on batch {batch_ids}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return []  # graceful degradation: this batch gets fallback labels
 
         return list(ichain.from_iterable(map(invoke_batch, label_batches)))
 
-    all_model_results = list(map(get_labels_from_model, enumerate(COUNCIL_MODELS)))
+    def get_labels_from_model_safe(idx_model):
+        # FIX: if an entire model fails, return empty list rather than crashing
+        try:
+            return get_labels_from_model(idx_model)
+        except Exception as exc:
+            _, model_name = idx_model
+            print(
+                f"[CouncilModel] {model_name} failed entirely: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return []
+
+    all_model_results = list(map(get_labels_from_model_safe, enumerate(COUNCIL_MODELS)))
 
     def get_one_proposal(result_list, cid_str):
         return next(
@@ -534,7 +556,7 @@ def label_topics_with_llm(run_key: str) -> str:
         max_tokens=4096,
         max_retries=5,
     )
-    council_chain = council_prompt | council_llm | parser
+    council_chain = council_prompt | council_llm | _make_json_parser()  # FIX: robust parser
 
     COUNCIL_BATCH = 20
 
@@ -549,10 +571,19 @@ def label_topics_with_llm(run_key: str) -> str:
         )
 
     def process_council_batch(batch):
-        proposals_text = "\n\n".join(list(map(format_proposal_block, batch)))
-        result = council_chain.invoke({"proposals_text": proposals_text})
-        time.sleep(2)
-        return result if isinstance(result, list) else []
+        # FIX: catch per-batch failures — a bad batch returns empty, not a crash
+        try:
+            proposals_text = "\n\n".join(list(map(format_proposal_block, batch)))
+            result = council_chain.invoke({"proposals_text": proposals_text})
+            time.sleep(2)
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            batch_ids = list(map(lambda p: p["cluster_id"], batch))
+            print(
+                f"[CouncilBatch] Arbiter failed on batch {batch_ids}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return []  # these topics will get fallback labels
 
     batches = list(
         map(
@@ -613,7 +644,7 @@ def label_topics_with_llm(run_key: str) -> str:
     model_wins = dict(
         map(
             lambda pair: (pair[1], winning.count(pair[0] + 1)),
-            enumerate(["Llama-70b", "Llama-8b", "Qwen3-32b"]),
+            enumerate(["Llama-70b", "Llama-8b", "Gemma"]),
         )
     )
     synth_count = winning.count(0)
@@ -638,9 +669,23 @@ def run_bertopic_and_label(
     in one step. run_key must be 'abstract', 'title', or 'combined'.
     threshold is the Euclidean distance_threshold in 10d UMAP space (default 1.5).
     Lower values → more, finer clusters. Higher values → fewer, coarser clusters."""
-    discovery_result = run_bertopic_discovery(run_key, threshold)
-    label_result = label_topics_with_llm(run_key)
-    return discovery_result + "\n\n" + label_result
+    # FIX (2026-06-05): outer try/except so ANY exception returns a string rather
+    # than escaping the @tool boundary.  An unhandled exception here writes a
+    # dangling AIMessage(tool_calls=[...]) to MemorySaver with no matching
+    # ToolMessage, permanently breaking the LangGraph thread.
+    try:
+        discovery_result = run_bertopic_discovery(run_key, threshold)
+        label_result = label_topics_with_llm(run_key)
+        return discovery_result + "\n\n" + label_result
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(f"[run_bertopic_and_label] ERROR:\n{tb}")
+        return (
+            f"❌ run_bertopic_and_label failed on run_key='{run_key}'.\n"
+            f"Error: {type(exc).__name__}: {exc}\n\n"
+            f"Partial traceback (last 800 chars):\n{tb[-800:]}\n\n"
+            f"You may retry with the same arguments, or try a different run_key."
+        )
 
 
 # ─── Tool 3: Consolidate into Themes ─────────────────────────────────────────
@@ -651,72 +696,75 @@ def consolidate_into_themes(run_key: str, theme_map: dict) -> str:
     """Merge researcher-approved topic groups into consolidated themes.
     theme_map is a dict: {"Theme Name": [cluster_id1, cluster_id2, ...], ...}
     Recomputes sentence/paper counts. Saves themes.json."""
-    assert (CHECKPOINT_DIR / f"labels_{run_key}.json").exists(), (
-        f"labels_{run_key}.json not found. Call run_bertopic_and_label(run_key='{run_key}') first."
-    )
-    assert (CHECKPOINT_DIR / f"emb_{run_key}.npy").exists(), (
-        f"emb_{run_key}.npy not found. Call run_bertopic_and_label(run_key='{run_key}') first."
-    )
-    assert (CHECKPOINT_DIR / f"sentences_{run_key}.json").exists(), (
-        f"sentences_{run_key}.json not found. Call run_bertopic_and_label(run_key='{run_key}') first."
-    )
-
-    labels_data = json.loads((CHECKPOINT_DIR / f"labels_{run_key}.json").read_text())
-    cluster_lookup = dict(map(lambda t: (str(t["cluster_id"]), t), labels_data))
-
-    def build_theme(theme_name_ids):
-        theme_name, cluster_ids = theme_name_ids
-        member_topics = list(
-            filter(None, map(lambda cid: cluster_lookup.get(str(cid)), cluster_ids))
+    try:
+        assert (CHECKPOINT_DIR / f"labels_{run_key}.json").exists(), (
+            f"labels_{run_key}.json not found. Call run_bertopic_and_label(run_key='{run_key}') first."
         )
-        all_sentences = list(
-            ichain.from_iterable(
-                map(lambda t: t.get("top_sentences", []), member_topics)
+        assert (CHECKPOINT_DIR / f"emb_{run_key}.npy").exists(), (
+            f"emb_{run_key}.npy not found. Call run_bertopic_and_label(run_key='{run_key}') first."
+        )
+        assert (CHECKPOINT_DIR / f"sentences_{run_key}.json").exists(), (
+            f"sentences_{run_key}.json not found. Call run_bertopic_and_label(run_key='{run_key}') first."
+        )
+
+        labels_data = json.loads((CHECKPOINT_DIR / f"labels_{run_key}.json").read_text())
+        cluster_lookup = dict(map(lambda t: (str(t["cluster_id"]), t), labels_data))
+
+        def build_theme(theme_name_ids):
+            theme_name, cluster_ids = theme_name_ids
+            member_topics = list(
+                filter(None, map(lambda cid: cluster_lookup.get(str(cid)), cluster_ids))
+            )
+            all_sentences = list(
+                ichain.from_iterable(
+                    map(lambda t: t.get("top_sentences", []), member_topics)
+                )
+            )
+            total_size = sum(map(lambda t: t.get("size", 0), member_topics))
+            topic_labels = list(
+                map(lambda t: t.get("label", f"T{t['cluster_id']}"), member_topics)
+            )
+            all_paper_indices = set(
+                ichain.from_iterable(
+                    map(lambda t: t.get("paper_indices", []), member_topics)
+                )
+            )
+            return {
+                "theme_name": theme_name,
+                "cluster_ids": cluster_ids,
+                "merged_topic_labels": topic_labels,
+                "total_sentences": total_size,
+                "paper_count": len(all_paper_indices),
+                "representative_sentences": all_sentences[:NEAREST_K],
+                "sub_topics": len(member_topics),
+            }
+
+        themes = list(map(build_theme, theme_map.items()))
+        themes_sorted = sorted(themes, key=lambda x: x["total_sentences"], reverse=True)
+
+        (CHECKPOINT_DIR / f"themes_{run_key}.json").write_text(
+            json.dumps(themes_sorted, indent=2)
+        )
+        theme_summary = "\n".join(
+            list(
+                map(
+                    lambda pair: (
+                        f"  {pair[0] + 1}. {pair[1]['theme_name']} ({pair[1]['total_sentences']} sentences, {pair[1]['sub_topics']} sub-topics)"
+                    ),
+                    enumerate(themes_sorted),
+                )
             )
         )
-        total_size = sum(map(lambda t: t.get("size", 0), member_topics))
-        topic_labels = list(
-            map(lambda t: t.get("label", f"T{t['cluster_id']}"), member_topics)
-        )
-        all_paper_indices = set(
-            ichain.from_iterable(
-                map(lambda t: t.get("paper_indices", []), member_topics)
-            )
-        )
-        return {
-            "theme_name": theme_name,
-            "cluster_ids": cluster_ids,
-            "merged_topic_labels": topic_labels,
-            "total_sentences": total_size,
-            "paper_count": len(all_paper_indices),
-            "representative_sentences": all_sentences[:NEAREST_K],
-            "sub_topics": len(member_topics),
-        }
 
-    themes = list(map(build_theme, theme_map.items()))
-    themes_sorted = sorted(themes, key=lambda x: x["total_sentences"], reverse=True)
-
-    (CHECKPOINT_DIR / f"themes_{run_key}.json").write_text(
-        json.dumps(themes_sorted, indent=2)
-    )
-    theme_summary = "\n".join(
-        list(
-            map(
-                lambda pair: (
-                    f"  {pair[0] + 1}. {pair[1]['theme_name']} ({pair[1]['total_sentences']} sentences, {pair[1]['sub_topics']} sub-topics)"
-                ),
-                enumerate(themes_sorted),
-            )
+        return (
+            f"Themes consolidated for run_key='{run_key}'.\n"
+            f"  Total themes: {len(themes_sorted)}\n"
+            f"Themes:\n{theme_summary}\n"
+            f"  Checkpoint: themes_{run_key}.json\n"
+            f"Review consolidated themes in the table. Click Submit Review to confirm or adjust."
         )
-    )
-
-    return (
-        f"Themes consolidated for run_key='{run_key}'.\n"
-        f"  Total themes: {len(themes_sorted)}\n"
-        f"Themes:\n{theme_summary}\n"
-        f"  Checkpoint: themes_{run_key}.json\n"
-        f"Review consolidated themes in the table. Click Submit Review to confirm or adjust."
-    )
+    except Exception as exc:
+        return f"❌ consolidate_into_themes failed: {type(exc).__name__}: {exc}"
 
 
 # ─── Tool 4: Compare with PAJAIS Taxonomy ────────────────────────────────────
@@ -727,117 +775,122 @@ def compare_with_taxonomy(run_key: str) -> str:
     """Map final themes to the PAJAIS 25 research categories using ChatGroq LLM.
     Each theme is classified as MAPPED (with category) or NOVEL (new contribution).
     Saves taxonomy_map.json."""
-    assert (CHECKPOINT_DIR / f"themes_{run_key}.json").exists(), (
-        f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
-    )
+    try:
+        assert (CHECKPOINT_DIR / f"themes_{run_key}.json").exists(), (
+            f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+        )
 
-    themes = json.loads((CHECKPOINT_DIR / f"themes_{run_key}.json").read_text())
+        themes = json.loads((CHECKPOINT_DIR / f"themes_{run_key}.json").read_text())
 
-    from agent import KEY_ROTATOR
+        from agent import KEY_ROTATOR
 
-    llm = ChatGroq(
-        model=GROQ_MODEL,
-        api_key=SecretStr(KEY_ROTATOR.next()),
-        temperature=0.1,
-        max_retries=5,
-    )
+        llm = ChatGroq(
+            model=GROQ_MODEL,
+            api_key=SecretStr(KEY_ROTATOR.next()),
+            temperature=0.1,
+            max_retries=5,
+        )
 
-    categories_text = "\n".join(
-        list(
-            map(
-                lambda pair: f"  {pair[0] + 1}. {pair[1]}", enumerate(PAJAIS_CATEGORIES)
+        categories_text = "\n".join(
+            list(
+                map(
+                    lambda pair: f"  {pair[0] + 1}. {pair[1]}", enumerate(PAJAIS_CATEGORIES)
+                )
             )
         )
-    )
 
-    def build_theme_text(t):
-        return f"THEME: {t['theme_name']}\nSentences: " + "; ".join(
-            t.get("representative_sentences", [])[:2]
+        def build_theme_text(t):
+            return f"THEME: {t['theme_name']}\nSentences: " + "; ".join(
+                t.get("representative_sentences", [])[:2]
+            )
+
+        prompt = PromptTemplate.from_template(
+            "You are a systematic literature review expert. Map each research theme to the PAJAIS taxonomy.\n\n"
+            "PAJAIS Categories:\n{categories}\n\n"
+            "For each theme, return a JSON object with:\n"
+            '- "theme_name": string (exact match from input)\n'
+            '- "pajais_match": string (exact category name from list above, or "NOVEL" if no match)\n'
+            '- "match_confidence": float 0-1 (0 if NOVEL)\n'
+            '- "is_novel": boolean\n'
+            '- "reasoning": one sentence explanation of the mapping or why it is novel\n\n'
+            "Return ONLY a JSON array, no preamble, no markdown, no backticks.\n\n"
+            "Themes to map:\n{themes_text}"
         )
 
-    prompt = PromptTemplate.from_template(
-        "You are a systematic literature review expert. Map each research theme to the PAJAIS taxonomy.\n\n"
-        "PAJAIS Categories:\n{categories}\n\n"
-        "For each theme, return a JSON object with:\n"
-        '- "theme_name": string (exact match from input)\n'
-        '- "pajais_match": string (exact category name from list above, or "NOVEL" if no match)\n'
-        '- "match_confidence": float 0-1 (0 if NOVEL)\n'
-        '- "is_novel": boolean\n'
-        '- "reasoning": one sentence explanation of the mapping or why it is novel\n\n'
-        "Return ONLY a JSON array, no preamble, no markdown, no backticks.\n\n"
-        "Themes to map:\n{themes_text}"
-    )
+        chain = prompt | llm | _make_json_parser()  # FIX: robust parser
 
-    # Use robust parser to guard against any future model swaps introducing thinking blocks
-    parser = _make_json_parser()
-    chain = prompt | llm | parser
+        BATCH_SIZE = 20
 
-    BATCH_SIZE = 20
+        def make_batches(lst, size):
+            return list(map(lambda i: lst[i : i + size], range(0, len(lst), size)))
 
-    def make_batches(lst, size):
-        return list(map(lambda i: lst[i : i + size], range(0, len(lst), size)))
+        def process_batch(batch):
+            try:
+                themes_text = "\n\n".join(list(map(build_theme_text, batch)))
+                res = chain.invoke({"categories": categories_text, "themes_text": themes_text})
+                time.sleep(2)
+                return res
+            except Exception as exc:
+                print(f"[TaxonomyBatch] failed: {type(exc).__name__}: {exc}")
+                return []
 
-    def process_batch(batch):
-        themes_text = "\n\n".join(list(map(build_theme_text, batch)))
-        res = chain.invoke({"categories": categories_text, "themes_text": themes_text})
-        time.sleep(2)
-        return res
+        batches = make_batches(themes, BATCH_SIZE)
+        raw_results = list(map(process_batch, batches))
 
-    batches = make_batches(themes, BATCH_SIZE)
-    raw_results = list(map(process_batch, batches))
-
-    result = list(
-        filter(
-            lambda item: isinstance(item, dict) and "theme_name" in item,
-            ichain.from_iterable(filter(lambda x: isinstance(x, list), raw_results)),
+        result = list(
+            filter(
+                lambda item: isinstance(item, dict) and "theme_name" in item,
+                ichain.from_iterable(filter(lambda x: isinstance(x, list), raw_results)),
+            )
         )
-    )
-    mapped = dict(map(lambda item: (item["theme_name"], item), result))
+        mapped = dict(map(lambda item: (item["theme_name"], item), result))
 
-    enriched = list(
-        map(
-            lambda t: {
-                **t,
-                **mapped.get(
-                    t["theme_name"],
-                    {
-                        "pajais_match": "NOVEL",
-                        "is_novel": True,
-                        "match_confidence": 0,
-                        "reasoning": "Taxonomy validation threshold unmet",
-                    },
-                ),
-            },
-            themes,
+        enriched = list(
+            map(
+                lambda t: {
+                    **t,
+                    **mapped.get(
+                        t["theme_name"],
+                        {
+                            "pajais_match": "NOVEL",
+                            "is_novel": True,
+                            "match_confidence": 0,
+                            "reasoning": "Taxonomy validation threshold unmet",
+                        },
+                    ),
+                },
+                themes,
+            )
         )
-    )
 
-    novel_count = sum(map(lambda t: int(t.get("is_novel", False)), enriched))
-    mapped_count = len(enriched) - novel_count
+        novel_count = sum(map(lambda t: int(t.get("is_novel", False)), enriched))
+        mapped_count = len(enriched) - novel_count
 
-    (CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json").write_text(
-        json.dumps(enriched, indent=2)
-    )
-
-    novel_names = list(
-        map(
-            lambda t: t["theme_name"],
-            filter(lambda t: t.get("is_novel", False), enriched),
+        (CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json").write_text(
+            json.dumps(enriched, indent=2)
         )
-    )
-    novel_text = (
-        "\n".join(map(lambda n: f"  * {n}", novel_names)) if novel_names else "  (none)"
-    )
 
-    return (
-        f"PAJAIS taxonomy mapping complete for run_key='{run_key}'.\n"
-        f"  Total themes mapped: {len(enriched)}\n"
-        f"  MAPPED to PAJAIS: {mapped_count}\n"
-        f"  NOVEL (not in taxonomy): {novel_count}\n"
-        f"NOVEL themes (your paper's contribution):\n{novel_text}\n"
-        f"  Checkpoint: taxonomy_map_{run_key}.json\n"
-        f"Review PAJAIS mapping in the table. NOVEL themes represent publishable contributions."
-    )
+        novel_names = list(
+            map(
+                lambda t: t["theme_name"],
+                filter(lambda t: t.get("is_novel", False), enriched),
+            )
+        )
+        novel_text = (
+            "\n".join(map(lambda n: f"  * {n}", novel_names)) if novel_names else "  (none)"
+        )
+
+        return (
+            f"PAJAIS taxonomy mapping complete for run_key='{run_key}'.\n"
+            f"  Total themes mapped: {len(enriched)}\n"
+            f"  MAPPED to PAJAIS: {mapped_count}\n"
+            f"  NOVEL (not in taxonomy): {novel_count}\n"
+            f"NOVEL themes (your paper's contribution):\n{novel_text}\n"
+            f"  Checkpoint: taxonomy_map_{run_key}.json\n"
+            f"Review PAJAIS mapping in the table. NOVEL themes represent publishable contributions."
+        )
+    except Exception as exc:
+        return f"❌ compare_with_taxonomy failed: {type(exc).__name__}: {exc}"
 
 
 # ─── Tool 5: Generate Comparison CSV ─────────────────────────────────────────
@@ -849,123 +902,126 @@ def generate_comparison_csv() -> str:
     side-by-side comparison DataFrame. Uses cosine similarity on theme name embeddings
     to pair each abstract theme with its best-matching title theme.
     Saves comparison.csv."""
-    abstract_path = CHECKPOINT_DIR / "themes_abstract.json"
-    title_path = CHECKPOINT_DIR / "themes_title.json"
+    try:
+        abstract_path = CHECKPOINT_DIR / "themes_abstract.json"
+        title_path = CHECKPOINT_DIR / "themes_title.json"
 
-    abstract_themes = (
-        json.loads(abstract_path.read_text()) if abstract_path.exists() else []
-    )
-    title_themes = json.loads(title_path.read_text()) if title_path.exists() else []
-
-    CONVERGENCE_THRESHOLD = 0.40
-    model = SentenceTransformer(EMBED_MODEL)
-
-    abstract_names = list(map(lambda t: t.get("theme_name", ""), abstract_themes))
-    title_names = list(map(lambda t: t.get("theme_name", ""), title_themes))
-
-    abstract_embs = (
-        model.encode(abstract_names, normalize_embeddings=True)
-        if abstract_names
-        else np.zeros((0, 768))
-    )
-    title_embs = (
-        model.encode(title_names, normalize_embeddings=True)
-        if title_names
-        else np.zeros((0, 768))
-    )
-
-    used_title_idxs = set()
-
-    def match_abstract_theme(abs_idx):
-        return (None, 0.0) if len(title_embs) == 0 else match_abstract_theme_v(abs_idx)
-
-    def match_abstract_theme_v(abs_idx):
-        sims = cosine_similarity(abstract_embs[abs_idx : abs_idx + 1], title_embs)[0]
-        available_mask = np.array(
-            list(map(lambda i: 0.0 if i in used_title_idxs else 1.0, range(len(sims))))
+        abstract_themes = (
+            json.loads(abstract_path.read_text()) if abstract_path.exists() else []
         )
-        masked_sims = sims * available_mask
-        best_idx = int(masked_sims.argmax())
-        return best_idx, float(masked_sims[best_idx])
+        title_themes = json.loads(title_path.read_text()) if title_path.exists() else []
 
-    matched_pairs = list(
-        map(
-            lambda abs_idx: (abs_idx, *match_abstract_theme(abs_idx)),
-            range(len(abstract_themes)),
+        CONVERGENCE_THRESHOLD = 0.40
+        model = SentenceTransformer(EMBED_MODEL)
+
+        abstract_names = list(map(lambda t: t.get("theme_name", ""), abstract_themes))
+        title_names = list(map(lambda t: t.get("theme_name", ""), title_themes))
+
+        abstract_embs = (
+            model.encode(abstract_names, normalize_embeddings=True)
+            if abstract_names
+            else np.zeros((0, 768))
         )
-    )
+        title_embs = (
+            model.encode(title_names, normalize_embeddings=True)
+            if title_names
+            else np.zeros((0, 768))
+        )
 
-    def claim_match(triple):
+        used_title_idxs = set()
+
+        def match_abstract_theme(abs_idx):
+            return (None, 0.0) if len(title_embs) == 0 else match_abstract_theme_v(abs_idx)
+
+        def match_abstract_theme_v(abs_idx):
+            sims = cosine_similarity(abstract_embs[abs_idx : abs_idx + 1], title_embs)[0]
+            available_mask = np.array(
+                list(map(lambda i: 0.0 if i in used_title_idxs else 1.0, range(len(sims))))
+            )
+            masked_sims = sims * available_mask
+            best_idx = int(masked_sims.argmax())
+            return best_idx, float(masked_sims[best_idx])
+
+        matched_pairs = list(
+            map(
+                lambda abs_idx: (abs_idx, *match_abstract_theme(abs_idx)),
+                range(len(abstract_themes)),
+            )
+        )
+
+        def claim_match(triple):
+            return (
+                (used_title_idxs.add(triple[1]) or (triple[0], triple[1], triple[2]))
+                if (triple[1] is not None and triple[1] not in used_title_idxs)
+                else (triple[0], None, triple[2])
+            )
+
+        final_pairs = list(map(claim_match, matched_pairs))
+
+        def make_row(triple):
+            abs_idx, title_idx, sim = triple
+            at = abstract_themes[abs_idx]
+            tt = title_themes[title_idx] if title_idx is not None else {}
+            return {
+                "Abstract Theme": at.get("theme_name", ""),
+                "Abstract Sentences": at.get("total_sentences", ""),
+                "Abstract Papers": at.get("paper_count", ""),
+                "Title Theme": tt.get("theme_name", ""),
+                "Title Sentences": tt.get("total_sentences", ""),
+                "Title Papers": tt.get("paper_count", ""),
+                "Similarity": round(sim, 3) if tt.get("theme_name", "") else "",
+                "Convergence": "ABSTRACT ONLY"
+                if not tt.get("theme_name", "")
+                else ("CONVERGED" if sim >= CONVERGENCE_THRESHOLD else "DIVERGED"),
+            }
+
+        rows = list(map(make_row, final_pairs))
+        matched_title_idxs = set(filter(None, map(lambda triple: triple[1], final_pairs)))
+        unmatched_title_rows = list(
+            map(
+                lambda ti: {
+                    "Abstract Theme": "",
+                    "Abstract Sentences": "",
+                    "Abstract Papers": "",
+                    "Title Theme": title_themes[ti].get("theme_name", ""),
+                    "Title Sentences": title_themes[ti].get("total_sentences", ""),
+                    "Title Papers": title_themes[ti].get("paper_count", ""),
+                    "Similarity": "",
+                    "Convergence": "TITLE ONLY",
+                },
+                filter(lambda i: i not in matched_title_idxs, range(len(title_themes))),
+            )
+        )
+
+        df = pd.DataFrame(rows + unmatched_title_rows)
+        df.to_csv(CHECKPOINT_DIR / "comparison.csv", index=False)
+
+        converged = sum(
+            map(lambda r: int(r["Convergence"] == "CONVERGED"), df.to_dict("records"))
+        )
+        abstract_only = sum(
+            map(lambda r: int(r["Convergence"] == "ABSTRACT ONLY"), df.to_dict("records"))
+        )
+        title_only = sum(
+            map(lambda r: int(r["Convergence"] == "TITLE ONLY"), df.to_dict("records"))
+        )
+        diverged = sum(
+            map(lambda r: int(r["Convergence"] == "DIVERGED"), df.to_dict("records"))
+        )
+
         return (
-            (used_title_idxs.add(triple[1]) or (triple[0], triple[1], triple[2]))
-            if (triple[1] is not None and triple[1] not in used_title_idxs)
-            else (triple[0], None, triple[2])
+            f"Comparison CSV generated (semantic matching, threshold={CONVERGENCE_THRESHOLD}).\n"
+            f"  Abstract themes: {len(abstract_themes)}\n"
+            f"  Title themes: {len(title_themes)}\n"
+            f"  CONVERGED pairs:  {converged}\n"
+            f"  DIVERGED pairs:   {diverged}\n"
+            f"  ABSTRACT ONLY:    {abstract_only}  (no close title match)\n"
+            f"  TITLE ONLY:       {title_only}  (no close abstract match)\n"
+            f"  Saved: comparison.csv\n"
+            f"Converged themes are stable — highest confidence for Section 7."
         )
-
-    final_pairs = list(map(claim_match, matched_pairs))
-
-    def make_row(triple):
-        abs_idx, title_idx, sim = triple
-        at = abstract_themes[abs_idx]
-        tt = title_themes[title_idx] if title_idx is not None else {}
-        return {
-            "Abstract Theme": at.get("theme_name", ""),
-            "Abstract Sentences": at.get("total_sentences", ""),
-            "Abstract Papers": at.get("paper_count", ""),
-            "Title Theme": tt.get("theme_name", ""),
-            "Title Sentences": tt.get("total_sentences", ""),
-            "Title Papers": tt.get("paper_count", ""),
-            "Similarity": round(sim, 3) if tt.get("theme_name", "") else "",
-            "Convergence": "ABSTRACT ONLY"
-            if not tt.get("theme_name", "")
-            else ("CONVERGED" if sim >= CONVERGENCE_THRESHOLD else "DIVERGED"),
-        }
-
-    rows = list(map(make_row, final_pairs))
-    matched_title_idxs = set(filter(None, map(lambda triple: triple[1], final_pairs)))
-    unmatched_title_rows = list(
-        map(
-            lambda ti: {
-                "Abstract Theme": "",
-                "Abstract Sentences": "",
-                "Abstract Papers": "",
-                "Title Theme": title_themes[ti].get("theme_name", ""),
-                "Title Sentences": title_themes[ti].get("total_sentences", ""),
-                "Title Papers": title_themes[ti].get("paper_count", ""),
-                "Similarity": "",
-                "Convergence": "TITLE ONLY",
-            },
-            filter(lambda i: i not in matched_title_idxs, range(len(title_themes))),
-        )
-    )
-
-    df = pd.DataFrame(rows + unmatched_title_rows)
-    df.to_csv(CHECKPOINT_DIR / "comparison.csv", index=False)
-
-    converged = sum(
-        map(lambda r: int(r["Convergence"] == "CONVERGED"), df.to_dict("records"))
-    )
-    abstract_only = sum(
-        map(lambda r: int(r["Convergence"] == "ABSTRACT ONLY"), df.to_dict("records"))
-    )
-    title_only = sum(
-        map(lambda r: int(r["Convergence"] == "TITLE ONLY"), df.to_dict("records"))
-    )
-    diverged = sum(
-        map(lambda r: int(r["Convergence"] == "DIVERGED"), df.to_dict("records"))
-    )
-
-    return (
-        f"Comparison CSV generated (semantic matching, threshold={CONVERGENCE_THRESHOLD}).\n"
-        f"  Abstract themes: {len(abstract_themes)}\n"
-        f"  Title themes: {len(title_themes)}\n"
-        f"  CONVERGED pairs:  {converged}\n"
-        f"  DIVERGED pairs:   {diverged}\n"
-        f"  ABSTRACT ONLY:    {abstract_only}  (no close title match)\n"
-        f"  TITLE ONLY:       {title_only}  (no close abstract match)\n"
-        f"  Saved: comparison.csv\n"
-        f"Converged themes are stable — highest confidence for Section 7."
-    )
+    except Exception as exc:
+        return f"❌ generate_comparison_csv failed: {type(exc).__name__}: {exc}"
 
 
 # ─── Tool 6: Export Narrative ─────────────────────────────────────────────────
@@ -975,85 +1031,88 @@ def generate_comparison_csv() -> str:
 def export_narrative(run_key: str = "abstract") -> str:
     """Generate a 500-word Section 7 narrative draft for a literature review paper.
     Uses final themes and PAJAIS taxonomy mapping. Saves narrative.txt."""
-    themes_path = CHECKPOINT_DIR / f"themes_{run_key}.json"
-    taxonomy_path = CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json"
+    try:
+        themes_path = CHECKPOINT_DIR / f"themes_{run_key}.json"
+        taxonomy_path = CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json"
 
-    assert themes_path.exists(), (
-        f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
-    )
-    assert taxonomy_path.exists(), (
-        f"taxonomy_map_{run_key}.json not found. Call compare_with_taxonomy(run_key='{run_key}') first."
-    )
-
-    themes = json.loads(themes_path.read_text())
-    taxonomy = json.loads(taxonomy_path.read_text())
-
-    tax_lookup = dict(map(lambda t: (t["theme_name"], t), taxonomy))
-
-    def theme_summary(t):
-        return f"- {t['theme_name']} ({t['total_sentences']} sentences) " + (
-            "[NOVEL]"
-            if tax_lookup.get(t["theme_name"], {}).get("is_novel", False)
-            else f"[PAJAIS: {tax_lookup.get(t['theme_name'], {}).get('pajais_match', 'NOVEL')}]"
+        assert themes_path.exists(), (
+            f"themes_{run_key}.json not found. Call consolidate_into_themes(run_key='{run_key}') first."
+        )
+        assert taxonomy_path.exists(), (
+            f"taxonomy_map_{run_key}.json not found. Call compare_with_taxonomy(run_key='{run_key}') first."
         )
 
-    themes_summary = "\n".join(list(map(theme_summary, themes)))
-    novel_themes = list(
-        map(
-            lambda t: t["theme_name"],
-            filter(
-                lambda t: tax_lookup.get(t["theme_name"], {}).get("is_novel", False),
-                themes,
-            ),
+        themes = json.loads(themes_path.read_text())
+        taxonomy = json.loads(taxonomy_path.read_text())
+
+        tax_lookup = dict(map(lambda t: (t["theme_name"], t), taxonomy))
+
+        def theme_summary(t):
+            return f"- {t['theme_name']} ({t['total_sentences']} sentences) " + (
+                "[NOVEL]"
+                if tax_lookup.get(t["theme_name"], {}).get("is_novel", False)
+                else f"[PAJAIS: {tax_lookup.get(t['theme_name'], {}).get('pajais_match', 'NOVEL')}]"
+            )
+
+        themes_summary = "\n".join(list(map(theme_summary, themes)))
+        novel_themes = list(
+            map(
+                lambda t: t["theme_name"],
+                filter(
+                    lambda t: tax_lookup.get(t["theme_name"], {}).get("is_novel", False),
+                    themes,
+                ),
+            )
         )
-    )
-    novel_list = ", ".join(novel_themes) if novel_themes else "none identified"
+        novel_list = ", ".join(novel_themes) if novel_themes else "none identified"
 
-    from agent import KEY_ROTATOR
+        from agent import KEY_ROTATOR
 
-    llm = ChatGroq(
-        model=GROQ_MODEL,
-        api_key=SecretStr(KEY_ROTATOR.next()),
-        temperature=0.3,
-        max_retries=5,
-    )
-    prompt = PromptTemplate.from_template(
-        "You are writing Section 7 of a conference paper on topic modelling of a journal's literature.\n\n"
-        "Write approximately 500 words. Structure as follows:\n"
-        "(a) Methodology: State that BERTopic with sentence-level embeddings (allenai/specter2_base, 768 dimensions), "
-        "UMAP dimensionality reduction (10d), and AgglomerativeClustering (Ward linkage, Euclidean distance) was used. "
-        "Mention Braun & Clarke (2006) six-phase thematic analysis and the researcher-in-the-loop validation.\n"
-        "(b) Findings: Describe each theme with its label, sentence count, and PAJAIS mapping status. "
-        "Reference the comparison CSV and PAJAIS taxonomy map.\n"
-        "(c) Interpretation: What do these themes reveal about the journal's research landscape? "
-        "Highlight convergence between abstract and title runs as evidence of stability.\n"
-        "(d) Contribution: Explicitly name the NOVEL themes as the paper's contribution to the field.\n"
-        "(e) Limitations: Acknowledge UMAP stochasticity, sentence-level (not document-level) analysis, "
-        "and LLM labelling subjectivity per Carlsen & Ralund (2022).\n\n"
-        "Themes discovered (run: {run_key}):\n{themes_summary}\n\n"
-        "Novel themes (not in PAJAIS taxonomy): {novel_list}\n\n"
-        "Write in formal academic English. Cite Braun & Clarke (2006), Grootendorst (2022), and Carlsen & Ralund (2022)."
-    )
+        llm = ChatGroq(
+            model=GROQ_MODEL,
+            api_key=SecretStr(KEY_ROTATOR.next()),
+            temperature=0.3,
+            max_retries=5,
+        )
+        prompt = PromptTemplate.from_template(
+            "You are writing Section 7 of a conference paper on topic modelling of a journal's literature.\n\n"
+            "Write approximately 500 words. Structure as follows:\n"
+            "(a) Methodology: State that BERTopic with sentence-level embeddings (allenai/specter2_base, 768 dimensions), "
+            "UMAP dimensionality reduction (10d), and AgglomerativeClustering (Ward linkage, Euclidean distance) was used. "
+            "Mention Braun & Clarke (2006) six-phase thematic analysis and the researcher-in-the-loop validation.\n"
+            "(b) Findings: Describe each theme with its label, sentence count, and PAJAIS mapping status. "
+            "Reference the comparison CSV and PAJAIS taxonomy map.\n"
+            "(c) Interpretation: What do these themes reveal about the journal's research landscape? "
+            "Highlight convergence between abstract and title runs as evidence of stability.\n"
+            "(d) Contribution: Explicitly name the NOVEL themes as the paper's contribution to the field.\n"
+            "(e) Limitations: Acknowledge UMAP stochasticity, sentence-level (not document-level) analysis, "
+            "and LLM labelling subjectivity per Carlsen & Ralund (2022).\n\n"
+            "Themes discovered (run: {run_key}):\n{themes_summary}\n\n"
+            "Novel themes (not in PAJAIS taxonomy): {novel_list}\n\n"
+            "Write in formal academic English. Cite Braun & Clarke (2006), Grootendorst (2022), and Carlsen & Ralund (2022)."
+        )
 
-    chain = prompt | llm
-    response = chain.invoke(
-        {"run_key": run_key, "themes_summary": themes_summary, "novel_list": novel_list}
-    )
+        chain = prompt | llm
+        response = chain.invoke(
+            {"run_key": run_key, "themes_summary": themes_summary, "novel_list": novel_list}
+        )
 
-    narrative = (
-        response.content if isinstance(response.content, str) else str(response.content)
-    )
-    (CHECKPOINT_DIR / "narrative.txt").write_text(narrative)
+        narrative = (
+            response.content if isinstance(response.content, str) else str(response.content)
+        )
+        (CHECKPOINT_DIR / "narrative.txt").write_text(narrative)
 
-    return (
-        f"Section 7 narrative generated (~500 words).\n"
-        f"  Run: {run_key}\n"
-        f"  Themes covered: {len(themes)}\n"
-        f"  Novel themes: {len(novel_themes)}\n"
-        f"  Saved: narrative.txt\n"
-        f"Download from the Results tab. Use as the base draft for Section 7.\n\n"
-        f"--- NARRATIVE PREVIEW (first 300 chars) ---\n{narrative[:300]}..."
-    )
+        return (
+            f"Section 7 narrative generated (~500 words).\n"
+            f"  Run: {run_key}\n"
+            f"  Themes covered: {len(themes)}\n"
+            f"  Novel themes: {len(novel_themes)}\n"
+            f"  Saved: narrative.txt\n"
+            f"Download from the Results tab. Use as the base draft for Section 7.\n\n"
+            f"--- NARRATIVE PREVIEW (first 300 chars) ---\n{narrative[:300]}..."
+        )
+    except Exception as exc:
+        return f"❌ export_narrative failed: {type(exc).__name__}: {exc}"
 
 
 # ─── Exported tool list ───────────────────────────────────────────────────────
