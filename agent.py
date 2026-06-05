@@ -319,6 +319,82 @@ def create_agent():
     return _current_agent
 
 
+# ─── Checkpoint repair ────────────────────────────────────────────────────────
+
+
+def _repair_dangling_tool_calls(agent, config: dict) -> int:
+    """
+    Inspect the MemorySaver checkpoint for the given thread and inject a
+    synthetic ToolMessage for every tool_call that has no matching response.
+
+    Why this is needed
+    ──────────────────
+    LangGraph writes the AIMessage (containing tool_calls) to the checkpoint
+    *before* the tool actually executes.  If an exception fires between those
+    two events — a Groq 429, a JSON parse error, anything — the checkpoint
+    ends up with a "dangling" tool_call that has no ToolMessage answer.
+
+    The next time invoke_agent tries to append a HumanMessage on that same
+    thread, LangGraph's state validator raises:
+        "Found AIMessages with tool_calls that do not have a corresponding
+         ToolMessage."
+    and the conversation thread is permanently broken.
+
+    Fix: before every invoke attempt, find all unanswered tool_calls and
+    inject a synthetic ToolMessage for each so the state machine is valid.
+    The LLM will then see the "interrupted" result and naturally retry.
+
+    Returns the number of tool_calls that were repaired (0 = nothing to fix).
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    try:
+        state = agent.get_state(config)
+    except Exception:
+        return 0  # thread has no state yet — nothing to repair
+
+    messages = state.values.get("messages", [])
+    if not messages:
+        return 0
+
+    # Collect every tool_call_id that already has a ToolMessage response
+    answered_ids: set[str] = {
+        m.tool_call_id
+        for m in messages
+        if hasattr(m, "tool_call_id") and m.tool_call_id
+    }
+
+    # Find tool_calls in AIMessages that were never answered
+    pending = [
+        tc
+        for m in messages
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+        for tc in m.tool_calls
+        if tc.get("id") not in answered_ids
+    ]
+
+    if not pending:
+        return 0
+
+    synthetic = [
+        ToolMessage(
+            content=(
+                "⚠️ Tool execution was interrupted (rate limit or internal error). "
+                "The tool did not complete. Please retry the request."
+            ),
+            tool_call_id=tc["id"],
+            name=tc.get("name", "unknown_tool"),
+        )
+        for tc in pending
+    ]
+    agent.update_state(config, {"messages": synthetic})
+    print(
+        f"[RepairCheckpoint] Injected {len(synthetic)} synthetic ToolMessage(s) "
+        f"for dangling tool call(s): {[tc.get('name') for tc in pending]}"
+    )
+    return len(pending)
+
+
 # ─── Convenience invoke wrapper ───────────────────────────────────────────────
 
 
@@ -337,8 +413,13 @@ def invoke_agent(
       3. Retries — up to len(KEY_ROTATOR._keys) times total.
     Only gives up and returns an error when every key has been tried.
 
-    Bug fix: previously the function returned an error immediately on the first
-    rate-limit hit without ever trying the other loaded API keys.
+    Checkpoint repair
+    ─────────────────
+    Before every invoke attempt _repair_dangling_tool_calls() is called.
+    A dangling tool_call (AIMessage with no matching ToolMessage) is left in
+    the MemorySaver whenever a previous attempt was interrupted mid-flight.
+    Without the repair LangGraph refuses to accept any further HumanMessages
+    on the thread, permanently breaking the conversation.
     """
     global _current_agent
 
@@ -351,6 +432,13 @@ def invoke_agent(
 
     for attempt in range(n_keys):
         try:
+            # ── Repair any dangling tool_calls left by a previous failed attempt ──
+            n_repaired = _repair_dangling_tool_calls(_current_agent, config)
+
+            # If we just repaired dangling calls the human message is already in
+            # the checkpoint from the previous attempt; don't append it twice.
+            # Instead pass it again so the LLM knows the user is re-requesting —
+            # it will see the synthetic error ToolMessage and retry the tool.
             result = _current_agent.invoke(  # ty:ignore[unresolved-attribute]
                 {"messages": [("human", content)]}, config=config
             )
@@ -368,6 +456,21 @@ def invoke_agent(
         except Exception as e:
             err = str(e)
             is_rate_limit = "rate_limit_exceeded" in err or "429" in err
+            is_dangling = "AIMessages with tool_calls" in err
+
+            if is_dangling:
+                # Repair failed to fix the state (shouldn't happen, but guard it).
+                # Clear the broken thread by forcing a new one on next call.
+                print(
+                    f"[RepairCheckpoint] WARNING — dangling tool_call repair did not "
+                    f"resolve the state on attempt {attempt + 1}. "
+                    f"Consider resetting the conversation."
+                )
+                return (
+                    "⚠️ **Conversation state corrupted** — the previous tool call "
+                    "was interrupted and could not be automatically repaired.\n\n"
+                    "Please start a **new conversation** (refresh the page) to continue."
+                )
 
             if is_rate_limit and attempt < n_keys - 1:
                 # ── Rotate to the next key and rebuild the agent ──────────────
