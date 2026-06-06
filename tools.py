@@ -455,17 +455,14 @@ def label_topics_with_llm(run_key: str) -> str:
 
         from agent import KEY_ROTATOR
 
-        # FIX: disable Qwen3 thinking mode at the API level (belt-and-suspenders)
-        extra_kwargs = (
-            {"thinking_budget_tokens": 0} if "qwen" in model_name.lower() else {}
-        )
+        # NOTE: thinking_budget_tokens was removed — Groq SDK does not accept it as a
+        # model_kwarg. <think> blocks are stripped by _make_json_parser() instead.
         llm = ChatGroq(
             model=model_name,
             api_key=SecretStr(KEY_ROTATOR.next()),
             temperature=0.1,
             max_tokens=4096,
             max_retries=5,
-            model_kwargs=extra_kwargs,
         )
         chain = labeling_prompt | llm | parser
 

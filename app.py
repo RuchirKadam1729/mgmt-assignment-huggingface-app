@@ -555,11 +555,11 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                 )
     # ─── Event: CSV Upload ────────────────────────────────────────────────────
 
-    def on_csv_upload(file_obj, history, thread_id):
+    def on_csv_upload(file_obj, history, thread_id, run_key):
         import shutil
 
         if file_obj is None:
-            return history, gr.update(), None
+            return history, gr.update(), None, gr.update()
 
         # Copy uploaded file to persistent checkpoint directory
         temp_path = file_obj.name
@@ -574,19 +574,20 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
         )
         history = history or []
         history.append({"role": "assistant", "content": response})
-        return history, get_phase_progress_html(), str(persistent_path)
+        updated_table = load_review_table(run_key)
+        return history, get_phase_progress_html(), str(persistent_path), updated_table
 
     csv_upload.upload(
         fn=on_csv_upload,
-        inputs=[csv_upload, chatbot, thread_id_state],
-        outputs=[chatbot, phase_progress, uploaded_path_state],
+        inputs=[csv_upload, chatbot, thread_id_state, run_selector],
+        outputs=[chatbot, phase_progress, uploaded_path_state, review_table],
     )
 
     # ─── Event: Send Message ──────────────────────────────────────────────────
 
-    def on_send(user_msg, history, uploaded_path, thread_id):
+    def on_send(user_msg, history, uploaded_path, thread_id, run_key):
         if not user_msg.strip():
-            return history, "", get_phase_progress_html()
+            return history, "", get_phase_progress_html(), gr.update()
 
         history = history or []
         history.append({"role": "user", "content": user_msg})
@@ -598,17 +599,22 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
             uploaded_file=uploaded_path,
         )
         history.append({"role": "assistant", "content": response})
-        return history, "", get_phase_progress_html()
+
+        # Auto-refresh the review table so it populates as soon as Phase 2 completes
+        # (previously the table stayed empty until the user manually clicked "Refresh table")
+        updated_table = load_review_table(run_key)
+
+        return history, "", get_phase_progress_html(), updated_table
 
     send_btn.click(
         fn=on_send,
-        inputs=[user_input, chatbot, uploaded_path_state, thread_id_state],
-        outputs=[chatbot, user_input, phase_progress],
+        inputs=[user_input, chatbot, uploaded_path_state, thread_id_state, run_selector],
+        outputs=[chatbot, user_input, phase_progress, review_table],
     )
     user_input.submit(
         fn=on_send,
-        inputs=[user_input, chatbot, uploaded_path_state, thread_id_state],
-        outputs=[chatbot, user_input, phase_progress],
+        inputs=[user_input, chatbot, uploaded_path_state, thread_id_state, run_selector],
+        outputs=[chatbot, user_input, phase_progress, review_table],
     )
 
     def on_reset():
