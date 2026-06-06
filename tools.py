@@ -1112,6 +1112,63 @@ def export_narrative(run_key: str = "abstract") -> str:
         return f"❌ export_narrative failed: {type(exc).__name__}: {exc}"
 
 
+# ─── Tool 7: Checkpoint diagnostics ──────────────────────────────────────────
+
+
+@tool
+def check_checkpoints() -> str:
+    """Inspect the checkpoints directory and report exactly what has been saved.
+    Use this whenever the review table appears empty or the researcher asks what
+    state the pipeline is in. Returns file names, sizes, and entry counts."""
+    try:
+        if not CHECKPOINT_DIR.exists():
+            return "❌ Checkpoint directory does not exist yet. Has Phase 1 run?"
+
+        all_files = sorted(CHECKPOINT_DIR.iterdir())
+        if not all_files:
+            return "Checkpoint directory exists but is empty. Has Phase 1 run?"
+
+        lines = ["Checkpoint state:"]
+        for f in all_files:
+            size_kb = f.stat().st_size / 1024
+            if f.suffix == ".json":
+                try:
+                    data = json.loads(f.read_text())
+                    entry_count = len(data) if isinstance(data, (list, dict)) else "?"
+                    lines.append(f"  {f.name}  ({size_kb:.1f} KB, {entry_count} entries)")
+                except Exception:
+                    lines.append(f"  {f.name}  ({size_kb:.1f} KB, unreadable)")
+            else:
+                lines.append(f"  {f.name}  ({size_kb:.1f} KB)")
+
+        # Summarise what's ready for the review table
+        lines.append("")
+        lines.append("Review table availability:")
+        for run_key in ("abstract", "title", "combined"):
+            for phase, fname in [
+                ("taxonomy", f"taxonomy_map_{run_key}.json"),
+                ("themes", f"themes_{run_key}.json"),
+                ("labels", f"labels_{run_key}.json"),
+            ]:
+                p = CHECKPOINT_DIR / fname
+                if p.exists():
+                    try:
+                        n = len(json.loads(p.read_text()))
+                    except Exception:
+                        n = 0
+                    lines.append(
+                        f"  run_key='{run_key}' → {phase} ready ({n} entries) — "
+                        f"set the dropdown to '{run_key}' and click Refresh table"
+                        if n > 0
+                        else f"  run_key='{run_key}' → {phase} file exists but is EMPTY"
+                    )
+                    break  # only report the most advanced phase
+
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"❌ check_checkpoints failed: {type(exc).__name__}: {exc}"
+
+
 # ─── Exported tool list ───────────────────────────────────────────────────────
 
 ALL_TOOLS = [
@@ -1121,4 +1178,5 @@ ALL_TOOLS = [
     compare_with_taxonomy,
     generate_comparison_csv,
     export_narrative,
+    check_checkpoints,
 ]

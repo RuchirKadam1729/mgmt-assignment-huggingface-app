@@ -116,94 +116,103 @@ def get_phase_progress_html(run_key: str = "abstract") -> str:
 # ─── Helper: Load Review Table ────────────────────────────────────────────────
 
 
+def _build_rows_from_labels(data: list) -> list:
+    """Convert labels_{run_key}.json data to Gradio Dataframe rows."""
+    return [
+        [
+            i + 1,
+            t.get("label", f"Topic {t.get('cluster_id', i)}"),
+            t.get("top_sentences", [""])[0] if t.get("top_sentences") else "",
+            t.get("size", ""),
+            "",
+            "yes",
+            "",
+            t.get("reasoning", ""),
+        ]
+        for i, t in enumerate(data[:200])
+    ]
+
+
+def _build_rows_from_themes(data: list) -> list:
+    return [
+        [
+            i + 1,
+            t.get("theme_name", ""),
+            "; ".join(t.get("representative_sentences", [])[:1]),
+            t.get("total_sentences", ""),
+            t.get("paper_count", ""),
+            "yes",
+            "",
+            "",
+        ]
+        for i, t in enumerate(data)
+    ]
+
+
+def _build_rows_from_taxonomy(data: list) -> list:
+    return [
+        [
+            i + 1,
+            t.get("theme_name", ""),
+            f"→ {t.get('pajais_match', 'NOVEL')} | {t.get('reasoning', '')}",
+            t.get("total_sentences", ""),
+            t.get("paper_count", t.get("sub_topics", "")),
+            "yes",
+            "",
+            t.get("reasoning", ""),
+        ]
+        for i, t in enumerate(data)
+    ]
+
+
+def _load_for_key(run_key: str) -> list:
+    """Try to load the best available checkpoint for a given run_key."""
+    for path, builder in [
+        (CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json", _build_rows_from_taxonomy),
+        (CHECKPOINT_DIR / f"themes_{run_key}.json", _build_rows_from_themes),
+        (CHECKPOINT_DIR / f"labels_{run_key}.json", _build_rows_from_labels),
+    ]:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                if data:  # non-empty list
+                    rows = builder(data)
+                    print(f"[ReviewTable] Loaded {len(rows)} rows from {path.name}")
+                    return rows
+                else:
+                    print(f"[ReviewTable] {path.name} exists but is empty ([])")
+            except Exception as exc:
+                print(f"[ReviewTable] Failed to parse {path.name}: {exc}")
+    return []
+
+
 def load_review_table(run_key: str = "abstract") -> list:
-    """Load review table from the most advanced checkpoint available."""
-    tax_path = CHECKPOINT_DIR / f"taxonomy_map_{run_key}.json"
-    themes_path = CHECKPOINT_DIR / f"themes_{run_key}.json"
-    labels_path = CHECKPOINT_DIR / f"labels_{run_key}.json"
-    summaries_path = CHECKPOINT_DIR / f"summaries_{run_key}.json"
+    """Load review table from the most advanced checkpoint available.
 
-    if tax_path.exists():
-        data = json.loads(tax_path.read_text())
-        return list(
-            map(
-                lambda i_t: [
-                    i_t[0] + 1,
-                    i_t[1].get("theme_name", ""),
-                    f"→ {i_t[1].get('pajais_match', 'NOVEL')} | {i_t[1].get('reasoning', '')}",
-                    i_t[1].get("total_sentences", ""),
-                    i_t[1].get("paper_count", i_t[1].get("sub_topics", "")),
-                    "yes",
-                    "",
-                    i_t[1].get("reasoning", ""),
-                ],
-                enumerate(data),
-            )
+    FIX (2026-06-06): tries all three run_keys as fallback so a mismatch between
+    the agent's chosen run_key and the dropdown default never leaves the table blank.
+    """
+    all_keys = [run_key] + [k for k in ("abstract", "title", "combined") if k != run_key]
+
+    for key in all_keys:
+        rows = _load_for_key(key)
+        if rows:
+            if key != run_key:
+                print(
+                    f"[ReviewTable] WARNING: run_key='{run_key}' had no data; "
+                    f"loaded '{key}' instead. User should switch the dropdown."
+                )
+            return rows
+
+    # Nothing found anywhere — log all checkpoint files to help diagnose
+    files = sorted(CHECKPOINT_DIR.glob("*.json"))
+    if files:
+        print(
+            f"[ReviewTable] No label/theme data found for any run_key. "
+            f"Existing checkpoints: {[f.name for f in files]}"
         )
-
-    if themes_path.exists():
-        data = json.loads(themes_path.read_text())
-        return list(
-            map(
-                lambda i_t: [
-                    i_t[0] + 1,
-                    i_t[1].get("theme_name", ""),
-                    "; ".join(i_t[1].get("representative_sentences", [])[:1]),
-                    i_t[1].get("total_sentences", ""),
-                    i_t[1].get("paper_count", ""),
-                    i_t[1].get("sub_topics", ""),
-                    "yes",
-                    "",
-                    "",
-                ],
-                enumerate(data),
-            )
-        )
-
-    if labels_path.exists():
-        data = json.loads(labels_path.read_text())
-        return list(
-            map(
-                lambda i_t: [
-                    i_t[0] + 1,
-                    i_t[1].get("label", f"Topic {i_t[1].get('cluster_id', i_t[0])}"),
-                    (
-                        i_t[1].get("top_sentences", [""])[0]
-                        if i_t[1].get("top_sentences")
-                        else ""
-                    ),
-                    i_t[1].get("size", ""),
-                    "",
-                    "",
-                    "",
-                    i_t[1].get("reasoning", ""),
-                ],
-                enumerate(data[:100]),
-            )
-        )
-
-    if summaries_path.exists():
-        data = json.loads(summaries_path.read_text())
-        return list(
-            map(
-                lambda i_t: [
-                    i_t[0] + 1,
-                    f"Topic {i_t[1].get('cluster_id', i_t[0])}",
-                    (
-                        i_t[1].get("top_sentences", [""])[0]
-                        if i_t[1].get("top_sentences")
-                        else ""
-                    ),
-                    i_t[1].get("size", ""),
-                    "",
-                    "",
-                    "",
-                    "",
-                ],
-                enumerate(data[:100]),
-            )
-        )
-
+    else:
+        print("[ReviewTable] No checkpoint files at all — has Phase 1 run yet?")
     return []
 
 
@@ -600,8 +609,9 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
         )
         history.append({"role": "assistant", "content": response})
 
-        # Auto-refresh the review table so it populates as soon as Phase 2 completes
-        # (previously the table stayed empty until the user manually clicked "Refresh table")
+        # Auto-refresh: load_review_table now tries all run_keys as fallback
+        # so a mismatch between the agent's chosen run_key and the dropdown default
+        # no longer leaves the table blank after Phase 2 completes.
         updated_table = load_review_table(run_key)
 
         return history, "", get_phase_progress_html(), updated_table
