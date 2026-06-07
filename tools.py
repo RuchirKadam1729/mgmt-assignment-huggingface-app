@@ -271,15 +271,40 @@ def run_bertopic_discovery(
     sentences = list(map(lambda p: p[0], sentence_paper_pairs))
     sent_paper_ids = list(map(lambda p: p[1], sentence_paper_pairs))
 
-    model = SentenceTransformer(EMBED_MODEL)
-    embeddings = model.encode(
-        sentences, normalize_embeddings=True, show_progress_bar=False
-    )
+    emb_path = CHECKPOINT_DIR / f"emb_{run_key}.npy"
+    sentences_path = CHECKPOINT_DIR / f"sentences_{run_key}.json"
+    paper_ids_path = CHECKPOINT_DIR / f"paper_ids_{run_key}.json"
 
-    reducer = UMAP(
-        n_components=10, n_neighbors=15, min_dist=0.0, metric="cosine", random_state=42
-    )
-    reduced_embeddings = reducer.fit_transform(embeddings)
+    # ── Embedding cache ───────────────────────────────────────────────────────
+    # Encoding + UMAP takes 5-10 minutes and burns thousands of tokens on each
+    # retry.  Persist the embeddings after the first run so that interrupted
+    # runs (rate-limit, crash, etc.) skip straight to re-clustering (seconds).
+    if emb_path.exists() and sentences_path.exists():
+        print(
+            f"[BERTopic] Cache hit for run_key='{run_key}' — "
+            "loading embeddings, skipping encode+UMAP."
+        )
+        embeddings = np.load(emb_path)
+        sentences = json.loads(sentences_path.read_text())
+        sent_paper_ids = (
+            json.loads(paper_ids_path.read_text()) if paper_ids_path.exists() else []
+        )
+        reduced_embeddings = None  # will use embeddings directly for clustering
+    else:
+        model = SentenceTransformer(EMBED_MODEL)
+        embeddings = model.encode(
+            sentences, normalize_embeddings=True, show_progress_bar=False
+        )
+        np.save(emb_path, embeddings)
+        sentences_path.write_text(json.dumps(sentences))
+        paper_ids_path.write_text(json.dumps(sent_paper_ids))
+        reduced_embeddings = None  # computed below
+
+    if reduced_embeddings is None:
+        reducer = UMAP(
+            n_components=10, n_neighbors=15, min_dist=0.0, metric="cosine", random_state=42
+        )
+        reduced_embeddings = reducer.fit_transform(embeddings)
 
     clustering = AgglomerativeClustering(
         n_clusters=None,
@@ -333,11 +358,7 @@ def run_bertopic_discovery(
     (CHECKPOINT_DIR / f"summaries_{run_key}.json").write_text(
         json.dumps(summaries_sorted, indent=2)
     )
-    np.save(CHECKPOINT_DIR / f"emb_{run_key}.npy", embeddings)
-    (CHECKPOINT_DIR / f"sentences_{run_key}.json").write_text(json.dumps(sentences))
-    (CHECKPOINT_DIR / f"paper_ids_{run_key}.json").write_text(
-        json.dumps(sent_paper_ids)
-    )
+    # emb, sentences, paper_ids already written in the cache block above
 
     sizes = list(map(lambda s: s["size"], summaries_sorted[:30]))
     topic_names = list(map(lambda s: f"T{s['cluster_id']}", summaries_sorted[:30]))

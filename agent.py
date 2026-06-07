@@ -148,8 +148,6 @@ Action:
   This runs AgglomerativeClustering (threshold=1.5) then a Council of 3 LLMs to label each cluster.
   The arbiter LLM picks the best label. council_proposals field in labels.json shows all 3 options.
 Report: Show cluster count, noise points, model-win breakdown, sample labels.
-  Then IMMEDIATELY call check_checkpoints() to confirm the labels file was saved
-  and tell the researcher which run_key to select in the dropdown.
 Tell researcher:
   "Phase 2 complete. The review table below shows all discovered topics with:
    • Topic label (machine-generated)
@@ -327,27 +325,105 @@ def create_agent():
     return _current_agent
 
 
+# ─── Checkpoint helpers ───────────────────────────────────────────────────────
+
+
+def _repair_dangling_tool_calls(agent, config: dict) -> int:
+    """Inject a synthetic ToolMessage for every unanswered tool_call in the
+    checkpoint so LangGraph's state machine never blocks the next invoke.
+
+    Why: LangGraph writes AIMessage(tool_calls=[...]) to the checkpoint BEFORE
+    the tool executes.  If an exception fires between those two events the
+    checkpoint is left with a dangling tool_call and every subsequent invoke
+    raises "Found AIMessages with tool_calls that do not have a corresponding
+    ToolMessage."  Injecting a synthetic ToolMessage unblocks it.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    try:
+        state = agent.get_state(config)
+    except Exception:
+        return 0
+
+    msgs = state.values.get("messages", [])
+    if not msgs:
+        return 0
+
+    answered_ids = {m.tool_call_id for m in msgs if hasattr(m, "tool_call_id") and m.tool_call_id}
+    pending = [
+        tc
+        for m in msgs
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+        for tc in m.tool_calls
+        if tc.get("id") not in answered_ids
+    ]
+    if not pending:
+        return 0
+
+    synthetic = [
+        ToolMessage(
+            content="⚠️ Tool execution was interrupted (rate limit or error). Please retry.",
+            tool_call_id=tc["id"],
+            name=tc.get("name", "unknown_tool"),
+        )
+        for tc in pending
+    ]
+    agent.update_state(config, {"messages": synthetic})
+    print(f"[RepairCheckpoint] Injected {len(synthetic)} synthetic ToolMessage(s) for: "
+          f"{[tc.get('name') for tc in pending]}")
+    return len(pending)
+
+
+def _should_resume(agent, config: dict, content: str) -> bool:
+    """Return True when the checkpoint already contains this turn's context and
+    the agent should *continue* rather than receive a duplicate HumanMessage.
+
+    THE VICIOUS-CYCLE BUG this fixes:
+      1. Agent calls run_bertopic_and_label → checkpoint: [HumanMsg, AI(tool_call), ToolMsg]
+      2. Agent LLM tries to say "Phase 2 complete" → rate-limit → exception
+      3. invoke_agent rotates key, retries with {"messages": [("human", content)]}
+      4. Appends ANOTHER HumanMessage → checkpoint: [..., ToolMsg, HumanMsg("run abstract")]
+      5. Agent reads the new HumanMessage as a fresh request → re-runs UMAP + labelling
+      6. Repeat until all keys and daily token budgets are exhausted.
+
+    Instead we pass {"messages": []} so the graph continues from the ToolMessage
+    and the LLM simply generates its "Phase 2 complete" response.
+    """
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    try:
+        state = agent.get_state(config)
+        msgs = state.values.get("messages", [])
+        if not msgs:
+            return False
+        last = msgs[-1]
+
+        # Tool completed but final LLM response was cut off → just continue
+        if isinstance(last, ToolMessage):
+            print("[InvokeAgent] Checkpoint ends with ToolMessage — resuming without new HumanMessage")
+            return True
+
+        # Same HumanMessage already added (LLM call failed before AIMessage) → don't duplicate
+        if isinstance(last, HumanMessage):
+            last_text = last.content if isinstance(last.content, str) else str(last.content)
+            if last_text == content:
+                print("[InvokeAgent] Duplicate HumanMessage detected — resuming without re-adding")
+                return True
+    except Exception:
+        pass
+    return False
+
+
 # ─── Convenience invoke wrapper ───────────────────────────────────────────────
 
 
 def invoke_agent(
-    agent,                          # kept for app.py call-site compatibility;
-    user_message: str,              # internally we use _current_agent so that
-    thread_id: str = "default",     # key-rotation swaps are transparent.
+    agent,
+    user_message: str,
+    thread_id: str = "default",
     uploaded_file: str | None = None,
 ) -> str:
-    """
-    Invoke the agent with a user message.
-
-    On a Groq rate-limit (429) the function:
-      1. Logs which attempt failed.
-      2. Rebuilds the agent with the next key in the rotation.
-      3. Retries — up to len(KEY_ROTATOR._keys) times total.
-    Only gives up and returns an error when every key has been tried.
-
-    Bug fix: previously the function returned an error immediately on the first
-    rate-limit hit without ever trying the other loaded API keys.
-    """
+    """Invoke the agent, rotating API keys on 429s without re-running Phase 2."""
     global _current_agent
 
     config = {"configurable": {"thread_id": thread_id}}
@@ -359,16 +435,19 @@ def invoke_agent(
 
     for attempt in range(n_keys):
         try:
-            result = _current_agent.invoke(  # ty:ignore[unresolved-attribute]
-                {"messages": [("human", content)]}, config=config
-            )
+            _repair_dangling_tool_calls(_current_agent, config)
+
+            # Only add the HumanMessage if it isn't already in the checkpoint
+            if _should_resume(_current_agent, config, content):
+                input_msgs: list = []
+            else:
+                input_msgs = [("human", content)]
+
+            result = _current_agent.invoke({"messages": input_msgs}, config=config)
             messages = result.get("messages", [])
             last_ai = next(
-                (
-                    m
-                    for m in reversed(messages)
-                    if hasattr(m, "content") and m.__class__.__name__ == "AIMessage"
-                ),
+                (m for m in reversed(messages)
+                 if hasattr(m, "content") and m.__class__.__name__ == "AIMessage"),
                 None,
             )
             return last_ai.content if last_ai else "No response from agent."
@@ -376,28 +455,28 @@ def invoke_agent(
         except Exception as e:
             err = str(e)
             is_rate_limit = "rate_limit_exceeded" in err or "429" in err
+            is_dangling = "AIMessages with tool_calls" in err
+
+            if is_dangling:
+                print(f"[RepairCheckpoint] WARNING — repair did not resolve state on attempt {attempt + 1}")
+                return (
+                    "⚠️ **Conversation state corrupted** — the previous tool call was interrupted "
+                    "and could not be repaired.\n\nPlease start a **new conversation** (refresh the page)."
+                )
 
             if is_rate_limit and attempt < n_keys - 1:
-                # ── Rotate to the next key and rebuild the agent ──────────────
-                # _SHARED_MEMORY is reused so conversation history is preserved.
-                print(
-                    f"[KeyRotator] Rate limit on key {attempt + 1}/{n_keys}, "
-                    f"rotating to next key…"
-                )
+                print(f"[KeyRotator] Rate limit on key {attempt + 1}/{n_keys}, rotating to next key…")
                 _current_agent = _build_agent_with_next_key()
-                continue  # retry the same message with the new key
+                continue
 
-            # ── All keys exhausted, or non-rate-limit error ───────────────────
             if is_rate_limit:
                 wait = re.search(r"try again in (.+?)\.", err)
                 wait_str = wait.group(1) if wait else "~1 hour"
                 return (
                     f"⚠️ **Groq rate limit reached** — all {n_keys} API key(s) exhausted.\n\n"
                     f"Please try again in **{wait_str}**.\n"
-                    f"To add more capacity, add GROQ_API_KEY_{n_keys + 1} in "
-                    f"HuggingFace Space secrets (Settings → Secrets)."
+                    f"To add capacity, add GROQ_API_KEY_{n_keys + 1} in HuggingFace Space secrets."
                 )
             return f"⚠️ Agent error: {err[:300]}"
 
-    # Should not be reached, but kept as a safety net
     return f"⚠️ All {n_keys} API keys exhausted. Please try again later."
