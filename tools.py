@@ -66,21 +66,29 @@ CHECKPOINT_DIR.mkdir(exist_ok=True)
 EMBED_MODEL = "allenai/specter2_base"  # 768-d scientific paper embeddings
 NEAREST_K = 3  # top 3 sentences per cluster centroid
 MAX_LABEL_TOPICS = 120  # label up to 120 clusters
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# Agent coordination model — llama-3.1-8b-instant has 500K TPD vs 100K for 70b.
+# The 70b model is kept as one voice in COUNCIL_MODELS for labelling quality,
+# but using it for the agent brain + taxonomy + council simultaneously burns the
+# 100K daily limit before Phase 2 even finishes.
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ── AgglomerativeClustering parameters ────────────────────────────────────────
 AGGLO_DISTANCE_THRESHOLD = 1.5
 AGGLO_MIN_CLUSTER_SIZE = 20  # discard clusters smaller than this (noise)
 AGGLO_MAX_CLUSTERS = 120  # cap review table rows
 
-# ── FIX: batch size for per-model labeling calls ─────────────────────────────
+# ── Batch sizes for per-model labelling ──────────────────────────────────────
+# Qwen3-32b is limited to 6000 TPM on Groq free tier; each topic prompt is
+# ~400 tokens, so 15 × 400 = 6000 → hits the limit exactly (actually 6007 →
+# 413 error on every batch).  Use 10 for Qwen3, 15 for the others.
 LABEL_BATCH_SIZE = 15
+LABEL_BATCH_SIZE_QWEN = 10  # Qwen3-32b: 6000 TPM ÷ ~500 tokens/topic ≈ 10
 
 # Council of Agents — 3 independent labellers + 1 arbiter
 COUNCIL_MODELS = [
     "llama-3.3-70b-versatile",  # primary — high quality
-    "llama-3.1-8b-instant",  # fast lightweight voice
-    "qwen/qwen3-32b",  # third voice — different architecture, replaces decommissioned gemma2-9b-it
+    "llama-3.1-8b-instant",     # fast lightweight voice
+    "qwen/qwen3-32b",           # third voice — different architecture
 ]
 
 RUN_CONFIGS = {
@@ -487,10 +495,13 @@ def label_topics_with_llm(run_key: str) -> str:
         )
         chain = labeling_prompt | llm | parser
 
+        # Qwen3-32b has a 6000 TPM limit — use a smaller batch so requests don't 413
+        batch_size = LABEL_BATCH_SIZE_QWEN if "qwen" in model_name.lower() else LABEL_BATCH_SIZE
+
         label_batches = list(
             map(
-                lambda i: top_topics[i : i + LABEL_BATCH_SIZE],
-                range(0, len(top_topics), LABEL_BATCH_SIZE),
+                lambda i: top_topics[i : i + batch_size],
+                range(0, len(top_topics), batch_size),
             )
         )
 
@@ -692,6 +703,25 @@ def run_bertopic_and_label(
     # dangling AIMessage(tool_calls=[...]) to MemorySaver with no matching
     # ToolMessage, permanently breaking the LangGraph thread.
     try:
+        # ── Full-phase cache ──────────────────────────────────────────────────
+        # If labels already exist (from a previous run committed to git, or
+        # restored from a bundle), skip the entire pipeline and return immediately.
+        # This is the key mechanism that makes redeploys safe.
+        labels_path = CHECKPOINT_DIR / f"labels_{run_key}.json"
+        if labels_path.exists():
+            try:
+                existing = json.loads(labels_path.read_text())
+                if existing:
+                    n = len(existing)
+                    print(f"[BERTopic] Cache hit — labels_{run_key}.json has {n} entries, skipping re-run.")
+                    return (
+                        f"✅ Labels already computed for run_key='{run_key}' ({n} topics).\n"
+                        f"Loaded from cache — no re-run needed.\n"
+                        f"Ready for Phase 3: call consolidate_into_themes(run_key='{run_key}', theme_map={{...}})"
+                    )
+            except Exception:
+                pass  # corrupted file — fall through to re-run
+
         discovery_result = run_bertopic_discovery(run_key, threshold)
         label_result = label_topics_with_llm(run_key)
         return discovery_result + "\n\n" + label_result

@@ -304,8 +304,11 @@ def _build_agent_with_next_key():
     binding the agent to a single key for its entire lifetime.  Now every
     rebuild advances the rotator, so each key gets used in turn.
     """
+    # llama-3.1-8b-instant: 500K tokens/day vs 100K for 70b.
+    # 70b is kept in the labelling council for quality, but using it for agent
+    # coordination too burned the daily budget before Phase 2 finished.
     llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         api_key=SecretStr(KEY_ROTATOR.next()),
         temperature=0.1,
         disable_streaming=True,
