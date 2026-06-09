@@ -234,11 +234,14 @@ def get_chart_html(chart_name: str, run_key: str = "abstract") -> str:
 def get_download_files() -> list:
     candidates = [
         CHECKPOINT_DIR / "comparison.csv",
+        CHECKPOINT_DIR / "taxonomy_map_combined.json",
         CHECKPOINT_DIR / "taxonomy_map_abstract.json",
         CHECKPOINT_DIR / "taxonomy_map_title.json",
         CHECKPOINT_DIR / "narrative.txt",
+        CHECKPOINT_DIR / "themes_combined.json",
         CHECKPOINT_DIR / "themes_abstract.json",
         CHECKPOINT_DIR / "themes_title.json",
+        CHECKPOINT_DIR / "labels_combined.json",
         CHECKPOINT_DIR / "labels_abstract.json",
         CHECKPOINT_DIR / "labels_title.json",
     ]
@@ -404,7 +407,7 @@ def load_phase_snapshot(run_key: str, phase_label: str) -> list:
 
 with gr.Blocks(title="BERTopic Agentic AI") as app:
     # State
-    run_key_state = gr.State("abstract")
+    run_key_state = gr.State("combined")
     uploaded_path_state = gr.State(None)
     thread_id_state = gr.State(THREAD_ID)
 
@@ -481,7 +484,7 @@ with gr.Blocks(title="BERTopic Agentic AI") as app:
                 with gr.Row():
                     run_selector = gr.Dropdown(
                         choices=["abstract", "title", "combined"],
-                        value="abstract",
+                        value="combined",
                         label="Run",
                         scale=1,
                     )

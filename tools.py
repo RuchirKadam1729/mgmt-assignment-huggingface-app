@@ -84,6 +84,15 @@ AGGLO_MAX_CLUSTERS = 120  # cap review table rows
 LABEL_BATCH_SIZE = 15
 LABEL_BATCH_SIZE_QWEN = 10  # Qwen3-32b: 6000 TPM ÷ ~500 tokens/topic ≈ 10
 
+# ── Batch size for the council arbiter ───────────────────────────────────────
+# The arbiter uses llama-3.1-8b-instant with max_tokens=4096.
+# Groq TPM = input_tokens + max_output_tokens → 6000 limit means only
+# 6000 - 4096 = 1904 tokens are available for input.
+# Each 20-topic arbiter prompt uses ~2100 input tokens (observed: 6080-6196
+# total → all four batches 413'd).  At ~105 tokens/topic, safe batch = ⌊1904/105⌋ = 18,
+# but we use 10 to leave headroom for variation in proposal length.
+COUNCIL_ARBITER_BATCH_SIZE = 10
+
 # Council of Agents — 3 independent labellers + 1 arbiter
 COUNCIL_MODELS = [
     "llama-3.3-70b-versatile",  # primary — high quality
@@ -587,7 +596,7 @@ def label_topics_with_llm(run_key: str) -> str:
     )
     council_chain = council_prompt | council_llm | _make_json_parser()  # FIX: robust parser
 
-    COUNCIL_BATCH = 20
+    COUNCIL_BATCH = COUNCIL_ARBITER_BATCH_SIZE  # was 20 → now 10; see constant definition above
 
     def format_proposal_block(p):
         return f"TOPIC {p['cluster_id']} (size={p['size']}):\n" + "\n".join(
